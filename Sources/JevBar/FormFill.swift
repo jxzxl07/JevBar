@@ -348,12 +348,19 @@ struct FormFill: Sendable {
          and there is nothing to append to; a field with text in it is replaced
          in one step, because typing would append to that.
         */
-        let hasText = live.value?.isEmpty == false
-        if hasText {
-          _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
-        } else {
-          _ = try await engine.call("type_text", ["element_id": live.id, "text": value])
-        }
+        /*
+         `set_value`, always. Typing is what went wrong.
+
+         Switching an empty field to `type_text` was meant to satisfy a
+         controlled component, and it made a form that was filling four fields
+         fill none: the keystrokes go to whatever has focus, and a click that
+         has not finished scrolling the field into view has not focused it yet.
+         `set_value` names the element, so it cannot land somewhere else.
+
+         It is also what demonstrably worked — Last Name and Email were filled
+         by exactly this call, on the run before the change.
+        */
+        _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
 
 
         written.append((id: live.id, label: field.name, key: key, value: value))
