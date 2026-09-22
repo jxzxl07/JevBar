@@ -102,6 +102,7 @@ actor Agent {
     var performed: [String] = []
     var quietTurns = 0
     var lastFingerprint = ""
+    var retriedEmptyPage = false
 
     if step.closes {
       guard let app = step.app else {
@@ -142,7 +143,9 @@ actor Agent {
       await log.step(runId: runId, step: number, detail: "opened \(url.host ?? site)")
       // A page asked to load is not a page that has loaded, and observing too
       // early reads whatever was on screen before.
-      try? await Task.sleep(for: .milliseconds(1_800))
+      // A page asked to load is not a page that has loaded, and YouTube in
+      // particular renders its header after the navigation completes.
+      try? await Task.sleep(for: .seconds(3))
     } else if let app = step.app {
       do {
         try await open(app: app)
@@ -271,6 +274,25 @@ actor Agent {
       case "ready_for_review":
         return RunResult(outcome: .readyForReview, message: move.reason, steps: performed)
       case "blocked":
+        /*
+         "Blocked" on the first look at a page is usually a page that has not
+         finished loading.
+
+         "Search MKBHD on YouTube" failed with "cannot find the search input
+         field", having found it a few minutes earlier — a navigation returns as
+         soon as macOS accepts it, and the first observation can land on a
+         window that is still empty. Failing there reports a missing control on
+         a page that has one.
+
+         One retry, and only while nothing has been done yet: once the run has
+         acted, "blocked" means what it says.
+        */
+        if performed.isEmpty, !retriedEmptyPage {
+          retriedEmptyPage = true
+          await log.step(runId: runId, step: number, detail: "page not ready; looking again")
+          try? await Task.sleep(for: .seconds(2))
+          continue
+        }
         return await fail(move.reason, runId: runId, step: number, performed: performed)
       default:
         break

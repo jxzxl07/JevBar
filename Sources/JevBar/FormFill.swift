@@ -265,6 +265,26 @@ struct FormFill: Sendable {
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
         _ = try await engine.call("set_value", ["element_id": field.id, "value": value])
+
+        /*
+         A list is committed here, not later.
+
+         This used to happen once at the end, over everything written. By then
+         every dropdown had closed — a list is only open while its own field has
+         focus, and focus had moved on five fields ago. So the right value was
+         typed, the right row was highlighted, and moving to the next field
+         threw it away. Worse, the ids read at the end belonged to a snapshot
+         taken after the page had changed, so clicking one landed on whatever
+         row now held that id: "Southend-on-Sea" committed as "North Sumatra,
+         Indonesia".
+
+         Committing while the list is still open is the whole of the fix, and it
+         is why this costs a round trip per combobox rather than one per form.
+        */
+        if Self.listRoles.contains(field.role) {
+          await commitOpenList(field: field, value: value, app: screen.app, task: task)
+        }
+
         written.append((id: field.id, label: field.name, key: key, value: value))
       } catch {
         outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
@@ -312,25 +332,8 @@ struct FormFill: Sendable {
       }
     }
 
-    /*
-     Commit any list that opened, before deciding what worked.
-
-     A combobox takes the text *and* opens a list, and leaves the choice
-     uncommitted until something picks it. "Bachelor's Degree" sat in the Degree
-     box on a real Stripe application with "Bachelor's Degree" highlighted
-     underneath it and nothing selected.
-
-     This used to run only for fields that had *rejected* `set_value` and been
-     retyped, which is exactly the set a combobox is not in: it accepts the
-     write, so it never reached the fallback and never got its list committed.
-    */
-    await commitSuggestions(on: after, for: written, task: task)
-
-    // Read again: committing a choice replaces the fragment in the box with the
-    // option's own text, and judging the write against the fragment would call
-    // a correctly chosen field stubborn.
-    try? await Task.sleep(for: .milliseconds(400))
-    let committed = (try? await reread(app: app)) ?? after
+    // Lists were already committed, field by field, while they were open.
+    let committed = after
 
     var outcomes: [FieldOutcome] = []
     var stubborn: [(id: String, label: String, key: String, value: String)] = []
@@ -475,6 +478,45 @@ struct FormFill: Sendable {
       Action(verb: .pressKey, controlName: control.name, value: "return"), in: task)
     else { return }
 
+    _ = try? await engine.call("press_key", ["key": "return", "element_id": field.id])
+  }
+
+  /// Roles that open a list when written into.
+  static let listRoles: Set<String> = ["ComboBox", "PopUpButton", "MenuButton", "SearchField"]
+
+  /// Commit the list this field has open, right now, while it still is.
+  ///
+  /// Clicking the offered row is preferred, because it is unambiguous: the row
+  /// says what will be chosen. Return is the fallback for a list rendered
+  /// somewhere the accessibility tree cannot see — Stripe's Country picker is
+  /// one — and it is bounded to this moment: a combobox with a list open, whose
+  /// own name the policy has cleared. A plain text field never reaches here.
+  private func commitOpenList(
+    field: Control, value: String, app: String, task: TaskKind
+  ) async {
+    // A list renders on the next frame; reading before it does sees the page
+    // without it and concludes there is nothing to commit.
+    try? await Task.sleep(for: .milliseconds(450))
+    guard let open = try? await reread(app: app) else { return }
+
+    let wanted = value.lowercased()
+    let row = open.controls.first { control in
+      control.id != field.id
+        && Self.suggestionRoles.contains(control.role)
+        && control.name.lowercased().hasPrefix(wanted)
+    }
+
+    if let row {
+      guard case .allow = authorize(
+        Action(verb: .click, controlName: row.name, value: nil), in: task)
+      else { return }
+      _ = try? await engine.call("click", ["element_id": row.id])
+      return
+    }
+
+    guard case .allow = authorize(
+      Action(verb: .pressKey, controlName: field.name, value: "return"), in: task)
+    else { return }
     _ = try? await engine.call("press_key", ["key": "return", "element_id": field.id])
   }
 
