@@ -283,3 +283,28 @@ struct ValueShapeTests {
     #expect(!valueSuits(key: "firstName", value: "   "))
   }
 }
+
+@Suite("Telling a form from the page around it")
+struct PageChromeTests {
+  @Test("the site's own language picker is not a form field")
+  func excludesFooterPickers() {
+    // A Stripe application ends with the site footer, which holds a country
+    // picker labelled "United States. Choose your country". It is a combobox
+    // with a country in it, so every test for "is this a field" said yes — and
+    // once the page had scrolled far enough it was the only thing on screen.
+    let picker = Control(
+      id: "e428", role: "ComboBox", name: "United States. Choose your country",
+      value: "United States", depth: 0)
+    #expect(isPageChrome(picker))
+  }
+
+  @Test("a real country field is still a field")
+  func keepsRealFields() {
+    // The distinction is phrasing: a form field is labelled with the thing it
+    // wants, page furniture with an instruction to the reader.
+    let field = Control(id: "e77", role: "ComboBox", name: "Country", value: nil, depth: 0)
+    #expect(!isPageChrome(field))
+    #expect(!isPageChrome(
+      Control(id: "e1", role: "TextField", name: "Current location", value: nil, depth: 0)))
+  }
+}

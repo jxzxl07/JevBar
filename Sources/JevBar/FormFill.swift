@@ -64,6 +64,7 @@ struct FormFill: Sendable {
   func fillVisible(screen: Screen, task: TaskKind) async -> FillResult {
     let fields = screen.controls.filter {
       Self.writableRoles.contains($0.role) && !$0.name.isEmpty
+        && !isPageChrome($0)
         // A secure field is listed so it can be *recognised* and refused, never
         // so it can be filled. The engine refuses it too; this is the second of
         // two independent guards rather than the only one.
@@ -251,21 +252,16 @@ struct FormFill: Sendable {
 
       do {
         /*
-         Brought into view first, because the engine will not touch what it
-         cannot see.
+         No scrolling here. There is no "scroll this into view".
 
-         Every field on a real Stripe application came back as "e130 is not
-         visible in its window — scroll it into view and call get_app_state
-         again". Scrolling the *page* between passes was not enough: a pass
-         writes what it observed, and most of what `get_app_state` returns is
-         below the fold, so the writes were refused before any scrolling
-         happened.
-
-         Scrolling to the element itself is one extra call per field and it is
-         the only thing that makes the rest possible.
+         `scroll` with an `element_id` moves *the nearest scrollable area
+         around* that element — it is "scroll this pane", not
+         `scrollIntoView`. Calling it per field simply pushed the page down
+         five lines each time, so a form ended at its own footer and the only
+         thing still writable was the page's language picker. Visibility is
+         handled by `fillWholeForm`, which scrolls once per pass and looks
+         again.
         */
-        _ = try? await engine.call("scroll", ["element_id": field.id])
-
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
         _ = try await engine.call("set_value", ["element_id": field.id, "value": value])
@@ -702,7 +698,16 @@ extension FormFill {
       let result = await fillVisible(screen: screen, task: task)
       let novel = result.outcomes.filter { !seen.contains($0.label) }
       outcomes.append(contentsOf: novel)
-      for outcome in novel { seen.insert(outcome.label) }
+
+      /*
+       A field refused for being off screen is not finished with.
+
+       Every outcome used to be marked seen, including "e130 is not visible in
+       its window" — so a field that simply had not been scrolled to yet was
+       recorded as done and never tried again. The pass that would have reached
+       it skipped it, and a whole Stripe application came back untouched.
+      */
+      for outcome in novel where !isRetryable(outcome) { seen.insert(outcome.label) }
 
       // Nothing new on this screenful and nowhere left to go.
       if novel.isEmpty && pass > 0 { break }
@@ -717,7 +722,27 @@ extension FormFill {
       try? await Task.sleep(for: .milliseconds(500))
     }
 
-    return FillResult(outcomes: outcomes)
+    /*
+     One outcome per field: the last one, which is the one that stuck.
+
+     A field tried on three passes produces three outcomes — two "not visible"
+     and one "filled" — and reporting all three would count the same box twice
+     and make "filled 6 fields" meaningless.
+    */
+    var latest: [String: FieldOutcome] = [:]
+    for outcome in outcomes { latest[outcome.label] = outcome }
+    let ordered = outcomes.compactMap { outcome -> FieldOutcome? in
+      guard let best = latest[outcome.label], best.label == outcome.label else { return nil }
+      latest.removeValue(forKey: outcome.label)
+      return best
+    }
+    return FillResult(outcomes: ordered)
+  }
+
+  /// Whether this outcome means "not yet", rather than "done".
+  private func isRetryable(_ outcome: FieldOutcome) -> Bool {
+    guard case .skipped(let why) = outcome.state else { return false }
+    return why.contains("not visible")
   }
 }
 
@@ -834,6 +859,26 @@ func valueSuits(key: String, value: String) -> Bool {
   default:
     return true
   }
+}
+
+/// Whether a control belongs to the page rather than to the form on it.
+///
+/// A Stripe application ends with the site's own footer, and that footer holds
+/// a country picker labelled "United States. Choose your country". It is a
+/// combobox with a country in it, so every test for "is this a form field"
+/// said yes — and once the page had scrolled far enough, it was the only thing
+/// still on screen. JevBar opened it and changed the site's language.
+///
+/// The distinguishing feature is not the role or the value but the phrasing: a
+/// form field is labelled with the thing it wants, while page furniture is
+/// labelled with an instruction to the reader.
+func isPageChrome(_ control: Control) -> Bool {
+  let label = control.name.lowercased()
+  let furniture = [
+    "choose your", "select your language", "change language", "change region",
+    "skip to", "search this site", "cookie", "accept all", "manage preferences",
+  ]
+  return furniture.contains { label.contains($0) }
 }
 
 /// Whether a field's own label asks for a credential.
