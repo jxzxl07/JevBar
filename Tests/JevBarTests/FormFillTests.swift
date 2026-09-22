@@ -364,3 +364,22 @@ struct RelocationTests {
     #expect(searchableWords(of: question) == "we are always aiming")
   }
 }
+
+@Suite("Leaving dropdowns alone")
+struct SkipDropdownTests {
+  @Test("a chooser is not something the filler writes into")
+  func choosersAreSkipped() {
+    // Typing into one and committing the row it offers was tried five ways and
+    // none held: the value lands, the list opens, and the choice is lost the
+    // moment focus moves. A half-typed "ingdom" with a list hanging under it is
+    // worse than an untouched field, because it has to be cleared first.
+    #expect(FormFill.chooserRoles.contains("PopUpButton"))
+    #expect(FormFill.listRoles.contains("ComboBox"))
+  }
+
+  @Test("a text field is still filled")
+  func textFieldsStillFill() {
+    #expect(FormFill.writableRoles.contains("TextField"))
+    #expect(FormFill.writableRoles.contains("TextArea"))
+  }
+}

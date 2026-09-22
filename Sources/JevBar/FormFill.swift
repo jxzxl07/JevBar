@@ -257,8 +257,21 @@ struct FormFill: Sendable {
         continue
       }
 
-      if Self.chooserRoles.contains(field.role) {
-        outcomes.append(await choose(value, in: field, task: task, key: key, app: screen.app))
+      /*
+       Dropdowns are left alone, deliberately.
+
+       Typing into one and committing the row it offers was tried five ways and
+       none of them held: the value lands, the list opens, and the choice is
+       lost the moment focus moves. Leaving a combobox untouched is worse than
+       filling it and better than what filling it currently does — a half-typed
+       "ingdom" sitting in the Country box with a list hanging under it is a
+       field the user now has to clear before they can fix it.
+
+       Reported, not silently skipped, so they are visibly the remaining work.
+      */
+      if Self.chooserRoles.contains(field.role) || Self.listRoles.contains(field.role) {
+        outcomes.append(
+          .init(label: field.name, state: .skipped("a dropdown — choose this one yourself")))
         continue
       }
 
@@ -321,21 +334,27 @@ struct FormFill: Sendable {
          events a controlled component listens for, and the field already has
          focus from the click above.
         */
-        var wrote = false
-        for attempt in 0..<2 where !wrote {
-          if attempt > 0 { try? await Task.sleep(for: .milliseconds(400)) }
-          wrote = (try? await engine.call(
-            "set_value", ["element_id": live.id, "value": value])) != nil
-        }
-        if !wrote {
+        /*
+         One write, never two.
+
+         First Name came out as "JazilJazil". The write was `set_value`
+         followed by `type_text` whenever `set_value` reported failure — and it
+         can report failure having already written, so the typed value appended
+         to the one that was there. A retry that cannot tell whether the first
+         attempt worked is a retry that doubles.
+
+         So the strategy is chosen up front instead: an empty field is typed
+         into, because typing produces the events a controlled component needs
+         and there is nothing to append to; a field with text in it is replaced
+         in one step, because typing would append to that.
+        */
+        let hasText = live.value?.isEmpty == false
+        if hasText {
+          _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
+        } else {
           _ = try await engine.call("type_text", ["element_id": live.id, "text": value])
         }
 
-        // A list is committed by clicking the row it offers. Nothing is ever
-        // typed into a form to make it commit — see `commitByClicking`.
-        if Self.listRoles.contains(live.role) {
-          _ = await commitByClicking(field: live, value: value, app: screen.app, task: task)
-        }
 
         written.append((id: live.id, label: field.name, key: key, value: value))
         writesThisPass += 1
@@ -461,74 +480,6 @@ struct FormFill: Sendable {
 
   /// Roles that open a list when written into, and only these get a Return.
   static let listRoles: Set<String> = ["ComboBox", "PopUpButton", "MenuButton"]
-
-  /// Click the row the list is offering, having just typed into the field.
-  ///
-  /// ## Why clicking and not Return
-  ///
-  /// Return was tried. In a text input it submits the form, and a Stripe
-  /// application came back with "Last Name is required", "Select a country" and
-  /// "Please enter your location" — validation errors, which a page only shows
-  /// after a submission was attempted. It did that once per field.
-  ///
-  /// Clicking the row is what a person does and cannot submit anything: the
-  /// thing being pressed is a row in a list, and its name is checked against
-  /// the policy first, so a row that somehow read "Submit application" is
-  /// refused like any other control.
-  ///
-  /// ## Why the row is matched by text
-  ///
-  /// Pressing the first row commits whatever the list happens to show, which on
-  /// a slow autocomplete is still the previous query's answer — that is how
-  /// "Southend-on-Sea" was once committed as "North Sumatra, Indonesia". The
-  /// match is a prefix because the row says more than was typed: "United
-  /// Kingdom +44" for "United Kingdom".
-  private func commitByClicking(
-    field: Control, value: String, app: String, task: TaskKind
-  ) async -> Bool {
-    // A list renders on the next frame; looking before it does finds nothing
-    // and concludes there was nothing to commit.
-    try? await Task.sleep(for: .milliseconds(500))
-
-    // The rows of an open list, not the whole page. A filtered read only
-    // describes what is visible, which is exactly right here: an open list is
-    // on screen, and a full read would cost as much as the fill itself.
-    guard
-      let outline = try? await engine.call(
-        "get_app_state", ["app": app, "query": value, "max_elements": 60])
-    else { return false }
-    let open = parseScreen(app: app, outline: outline)
-
-    /*
-     The row that is showing, which is the one under the field.
-
-     A prefix match was tried first and is too strict: a list offers "United
-     Kingdom +44" for "United Kingdom" but also "Bachelor's Degree (BA)" for
-     "Bachelor's", and a school picker rewrites what it shows entirely. Since
-     the value was typed into the field a moment ago, the list is already
-     filtered to it — so the first row it offers is the answer, and taking it
-     is the same action as clicking the option just below the box.
-
-     Matching is still tried first, because when it does match it is certain;
-     the first row is the fallback rather than the rule.
-    */
-    let wanted = value.lowercased()
-    let rows = open.controls.filter { control in
-      control.id != field.id && Self.suggestionRoles.contains(control.role)
-        && !control.name.isEmpty && !isPageChrome(control)
-    }
-    guard
-      let row = rows.first(where: { $0.name.lowercased().hasPrefix(wanted) })
-        ?? rows.first(where: { wanted.hasPrefix($0.name.lowercased()) })
-        ?? rows.first
-    else { return false }
-
-    guard case .allow = authorize(
-      Action(verb: .click, controlName: row.name, value: nil), in: task)
-    else { return false }
-
-    return (try? await engine.call("click", ["element_id": row.id])) != nil
-  }
 
   /// Roles a page uses for the rows of an autocomplete.
   static let suggestionRoles: Set<String> = [
