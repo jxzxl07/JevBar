@@ -244,6 +244,33 @@ actor Agent {
       return RunResult(outcome: .readyForReview, message: message, steps: performed)
     }
 
+    /*
+     A named search is done directly, not asked about.
+
+     "open youtube and search Jev" kept failing with "the search bar is not
+     visible in the current control list". The loop observes two thousand
+     controls and offers the model the first hundred and twenty, and YouTube's
+     search box is not reliably among them — so the model was answering
+     honestly about a list that did not contain the thing it needed.
+
+     Finding a search field is not a judgement call. It is one lookup by role,
+     and doing it here costs nothing and cannot be got wrong by a model that
+     was shown the wrong hundred and twenty controls.
+    */
+    if let query = searchQuery(in: step.goal) {
+      switch await search(for: query, app: step.app, runId: runId, number: number) {
+      case .success(let what):
+        performed.append(what)
+        return RunResult(outcome: .done, message: "Searched for \(query).", steps: performed)
+      case .refused(let why):
+        return RunResult(outcome: .refused, message: why, steps: performed)
+      case .failure(let why):
+        // Fall through to the loop, which can look at the screen and try
+        // something else — a page may put its search behind a button.
+        await log.step(runId: runId, step: number, detail: "direct search failed: \(why)")
+      }
+    }
+
     for _ in 0..<maxTurns {
       let screen: Screen
       do {
@@ -394,6 +421,59 @@ actor Agent {
   /// application at all — "open youtube" failed with `missing required argument
   /// 'app'` for exactly that reason. When nothing is named, the frontmost app is
   /// the subject, which is also what the user means by "this form".
+  /// Type a query into the page's own search box and run it.
+  ///
+  /// The wait is because a page asked to load is not a page that has loaded:
+  /// YouTube renders its header after the navigation returns, and looking
+  /// immediately finds a window with nothing in it.
+  private func search(
+    for query: String, app: String?, runId: String, number: Int
+  ) async -> Performed {
+    try? await Task.sleep(for: .seconds(1))
+
+    let target: String
+    if let app {
+      target = app
+    } else {
+      do { target = try await frontmostApp() } catch { return .failure("\(error)") }
+    }
+
+    // Asked for by role rather than read whole: a search box is one element on
+    // a page with hundreds, and the query keeps this to a fraction of a second.
+    guard
+      let outline = try? await engine.call(
+        "get_app_state", ["app": target, "query": "search", "max_elements": 80])
+    else { return .failure("I could not read \(target)") }
+
+    let screen = parseScreen(app: target, outline: outline)
+    let box = screen.controls.first { control in
+      ["SearchField", "TextField", "ComboBox"].contains(control.role)
+        && !control.name.lowercased().contains("filter")
+    }
+    guard let box else { return .failure("I could not find a search box in \(target)") }
+
+    let decision = authorize(
+      Action(verb: .typeText, controlName: box.name, value: query), in: .general)
+    if case .refuse(let why) = decision { return .refused(why) }
+
+    do {
+      // Clicked to focus, typed rather than written: a search box is a
+      // controlled component that discards a value arriving without the events
+      // a keystroke produces, which is why the search used to run empty.
+      _ = try await engine.call("click", ["element_id": box.id])
+      _ = try await engine.call("type_text", ["element_id": box.id, "text": query])
+      // Return runs the search. This is a search box on an ordinary page, not a
+      // field on an application — the one place Return is refused.
+      try? await Task.sleep(for: .milliseconds(300))
+      _ = try await engine.call("press_key", ["key": "return"])
+    } catch {
+      return .failure("\(error)")
+    }
+
+    await log.step(runId: runId, step: number, detail: "searched for \(query)")
+    return .success("searched for \(query)")
+  }
+
   private func observe(app: String?) async throws -> Screen {
     let target: String
     if let app {

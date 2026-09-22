@@ -154,3 +154,34 @@ struct OpenCloseTests {
     #expect(steps[1].app == "Safari")
   }
 }
+
+@Suite("Reading a search out of a sentence")
+struct SearchQueryTests {
+  @Test("the query is what follows the verb")
+  func readsTheQuery() {
+    #expect(searchQuery(in: "search Jev") == "Jev")
+    #expect(searchQuery(in: "search for sidemen") == "sidemen")
+    #expect(searchQuery(in: "look up MKBHD") == "MKBHD")
+  }
+
+  @Test("it stops at the next instruction")
+  func stopsAtTheNextClause() {
+    // "search Jev and open the first result" searches for Jev, not for the
+    // rest of the sentence.
+    #expect(searchQuery(in: "search Jev on youtube") == "Jev")
+    #expect(searchQuery(in: "search sidemen and then mute") == "sidemen")
+  }
+
+  @Test("a dictated full stop is not part of the query")
+  func stripsDictationPunctuation() {
+    // Whisper punctuates what it hears, so the box would be searched for
+    // "Jev." and find nothing.
+    #expect(searchQuery(in: "search for Jev.") == "Jev")
+  }
+
+  @Test("a clause that asks for nothing yields nothing")
+  func noQuery() {
+    #expect(searchQuery(in: "open youtube") == nil)
+    #expect(searchQuery(in: "close Safari") == nil)
+  }
+}

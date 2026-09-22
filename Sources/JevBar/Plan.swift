@@ -142,6 +142,38 @@ func splitClauses(_ command: String) -> [String] {
   return clauses
 }
 
+/// The text a clause asks to be searched for, if it asks at all.
+///
+/// Deterministic, because "search Jev on YouTube" is not a judgement call and a
+/// model round trip before anything can start is the slowest part of a fast
+/// task. The patterns stop at a following instruction, so "search Jev and open
+/// the first result" searches for "Jev" rather than for the rest of the
+/// sentence.
+func searchQuery(in clause: String) -> String? {
+  let patterns = [
+    #"\bsearch(?:\s+for)?\s+(.+?)(?=\s+(?:and|then|on)\b|$)"#,
+    #"\b(?:look\s+up|find)\s+(.+?)(?=\s+(?:and|then|on)\b|$)"#,
+    #"\btype\s+(.+?)(?=\s+(?:and|then|into|in)\b|$)"#,
+  ]
+  for pattern in patterns {
+    guard
+      let range = clause.range(of: pattern, options: [.regularExpression, .caseInsensitive])
+    else { continue }
+    let matched = String(clause[range])
+    // Drop the verb itself; what follows is the query.
+    guard let space = matched.firstIndex(of: " ") else { continue }
+    var query = String(matched[matched.index(after: space)...])
+    for lead in ["for ", "up "] where query.lowercased().hasPrefix(lead) {
+      query = String(query.dropFirst(lead.count))
+    }
+    // Whisper punctuates what it hears, so a dictated sentence ends in a full
+    // stop and the box would be searched for "Jev." instead of "Jev".
+    let cleaned = query.trimmingCharacters(in: CharacterSet(charactersIn: " .,;!?"))
+    if !cleaned.isEmpty { return cleaned }
+  }
+  return nil
+}
+
 /// Whether the clause asks for a form to be filled in.
 ///
 /// Separate from `looksLikeApplication`, which decides what is *refused*. This
