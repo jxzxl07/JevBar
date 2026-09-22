@@ -31,6 +31,15 @@ actor RunLog {
     append(runId, "step \(step)", detail)
   }
 
+  /// What the page offered when a field could not be found.
+  ///
+  /// Labels only, never values: this is about which control is which, and a
+  /// log carrying what was typed into an application carries someone's address.
+  func lookupFailed(label: String, query: String, offered: [String]) {
+    let names = offered.isEmpty ? "nothing" : offered.joined(separator: " | ")
+    append("lookup", "miss", "\(label) — asked '\(query)', got: \(names)")
+  }
+
   func finished(runId: String, outcome: String) {
     append(runId, "finished", outcome)
   }

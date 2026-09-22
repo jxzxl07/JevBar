@@ -40,6 +40,8 @@ struct FormFill: Sendable {
   let profile: Profile
   let think: Think?
   let documents: Documents
+  /// For recording why a lookup failed. Absent in tests, which have no log.
+  var log: RunLog?
 
   /// Roles worth trying to fill. A button is not a field, and neither is a label.
   ///
@@ -630,9 +632,41 @@ struct FormFill: Sendable {
     let found = parseScreen(app: app, outline: outline)
 
     let wanted = normalisedLabel(label)
-    return found.controls.first { control in
-      normalisedLabel(control.name) == wanted && !isPageChrome(control)
+    let writable = found.controls.filter {
+      !isPageChrome($0) && (Self.writableRoles.contains($0.role) || Self.listRoles.contains($0.role))
     }
+
+    if let exact = writable.first(where: { normalisedLabel($0.name) == wanted }) { return exact }
+
+    /*
+     Then a looser match, because a page does not always print a label twice
+     the same way.
+
+     A full read calls it "Location (City)" and a filtered read can call the
+     same control "Location (City) *" or wrap it — and an equality test then
+     says the field has gone. Containment either way round catches that without
+     matching a different field, because the query has already narrowed the
+     page to this label's own words.
+    */
+    if let loose = writable.first(where: { control in
+      let name = normalisedLabel(control.name)
+      return name.contains(wanted) || wanted.contains(name)
+    }) {
+      return loose
+    }
+
+    /*
+     And if there is still nothing, say what the page did offer.
+
+     "The field moved before I could write it" was true of a page that had
+     changed and of a lookup that was simply wrong, and those need opposite
+     fixes. Recording the names that came back turns the next run into an
+     answer instead of another guess — which is how the missing `AX` prefix and
+     the required marker were both found in one run each.
+    */
+    await log?.lookupFailed(
+      label: label, query: query, offered: Array(found.controls.map(\.name).prefix(12)))
+    return nil
   }
 
   private func reread(app: String) async throws -> Screen {
