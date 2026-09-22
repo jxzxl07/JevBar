@@ -369,6 +369,23 @@ actor Agent {
   /// application at all — "open youtube" failed with `missing required argument
   /// 'app'` for exactly that reason. When nothing is named, the frontmost app is
   /// the subject, which is also what the user means by "this form".
+  /// Whether a control now holds what was just written into it.
+  ///
+  /// A fresh observation rather than the one the action was chosen from: the
+  /// point is to see what the page decided to keep, and the old snapshot
+  /// predates the write.
+  private func landed(_ value: String, in id: String) async -> Bool {
+    try? await Task.sleep(for: .milliseconds(350))
+    guard let screen = try? await observe(app: nil) else { return true }
+    guard let now = screen.control(id: id)?.value else {
+      // The control is gone from the tree — the page re-rendered, which is
+      // usually what a successful write looks like. Retyping into an id that no
+      // longer exists would fail anyway.
+      return true
+    }
+    return now == value || now.hasPrefix(value)
+  }
+
   private func observe(app: String?) async throws -> Screen {
     let target: String
     if let app {
@@ -437,9 +454,31 @@ actor Agent {
         _ = try await engine.call("click", ["element_id": id])
         return .success("pressed \(describe(control))")
       case .setValue:
+        let wanted = move.text ?? ""
+        // The engine will not touch a control it cannot see, and most of a page
+        // is below the fold.
+        _ = try? await engine.call("scroll", ["element_id": id])
         // `set_value` replaces the whole field rather than inserting at the
         // caret, so filling the same box twice cannot produce `MKBHDMKBHD`.
-        _ = try await engine.call("set_value", ["element_id": id, "value": move.text ?? ""])
+        _ = try await engine.call("set_value", ["element_id": id, "value": wanted])
+
+        /*
+         And check it landed, because a search that types nothing still clicks.
+
+         "search sidemen on youtube" opened YouTube, reported the box filled,
+         pressed the search button and announced success — on an empty query.
+         YouTube's search field is a controlled component, so a value written
+         through the accessibility API without the events a keystroke produces
+         is discarded on the next render. The write succeeds and the page keeps
+         nothing.
+
+         The form lane learned this and reads back; the loop believed the
+         engine. Typing is the fallback, because typing produces the events.
+        */
+        if !(await landed(wanted, in: id)) {
+          _ = try? await engine.call("click", ["element_id": id])
+          _ = try await engine.call("type_text", ["element_id": id, "text": wanted])
+        }
         return .success("filled \(describe(control))")
       case .typeText:
         _ = try await engine.call("type_text", ["element_id": id, "text": move.text ?? ""])

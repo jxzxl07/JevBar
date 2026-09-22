@@ -250,6 +250,22 @@ struct FormFill: Sendable {
       }
 
       do {
+        /*
+         Brought into view first, because the engine will not touch what it
+         cannot see.
+
+         Every field on a real Stripe application came back as "e130 is not
+         visible in its window — scroll it into view and call get_app_state
+         again". Scrolling the *page* between passes was not enough: a pass
+         writes what it observed, and most of what `get_app_state` returns is
+         below the fold, so the writes were refused before any scrolling
+         happened.
+
+         Scrolling to the element itself is one extra call per field and it is
+         the only thing that makes the rest possible.
+        */
+        _ = try? await engine.call("scroll", ["element_id": field.id])
+
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
         _ = try await engine.call("set_value", ["element_id": field.id, "value": value])
@@ -324,7 +340,19 @@ struct FormFill: Sendable {
     var stubborn: [(id: String, label: String, key: String, value: String)] = []
 
     for write in written {
-      let now = committed.control(id: write.id)?.value
+      /*
+       Found by label, not by id.
+
+       An id belongs to one snapshot, and committing a list or scrolling to a
+       field re-renders the page and invalidates every id in it. Looking the
+       field up by id after that finds nothing, the comparison fails, and a
+       field that is visibly correct on screen is reported as "the page would
+       not keep this value" — which is what happened to First Name, Email and
+       Phone on a form where all three were plainly filled.
+      */
+      let now =
+        committed.control(id: write.id)?.value
+        ?? committed.controls.first { $0.name == write.label }?.value
       // A committed option often says more than was typed — "United Kingdom"
       // for "United", "Bachelor's Degree (BA)" for "Bachelor's Degree" — so a
       // prefix counts as landed.
