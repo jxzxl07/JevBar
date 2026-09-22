@@ -66,3 +66,47 @@ struct ProfileTests {
     #expect(await profile.value(for: key) == nil)
   }
 }
+
+@Suite("Reading a real accessibility outline")
+struct OutlineTests {
+  @Test("a web form's fields are recognised by role")
+  func recognisesWebFields() {
+    // The roles a browser reports for a web form. If the parser or the role set
+    // is wrong, filling reports "no fields" on a page full of them — which is
+    // true and useless, and is what it said on the first real attempt.
+    let outline = """
+      AXWindow "Application"
+        [e1] AXTextField "First Name"
+        [e2] AXTextArea "Cover letter"
+        [e3] AXComboBox "Degree"
+        [e4] AXButton "Submit application"
+        [e5] AXStaticText "Required"
+      """
+    let screen = parseScreen(app: "Safari", outline: outline)
+    #expect(screen.controls.count == 5)
+
+    let writable = screen.controls.filter {
+      ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains($0.role)
+    }
+    #expect(writable.map(\.id) == ["e1", "e2", "e3"])
+  }
+
+  @Test("the seeded profile answers an application's usual fields")
+  func profileAnswersCommonFields() async {
+    // The labels a real Lever and Greenhouse form actually use.
+    let profile = Profile()
+    let facts = await profile.all()
+    guard !facts.isEmpty else { return }  // Unseeded machine: nothing to assert.
+
+    for label in [
+      "First Name", "Last Name", "Email", "Phone", "Current location",
+      "LinkedIn URL", "GitHub URL",
+    ] {
+      guard let key = factKey(forLabel: label) else {
+        Issue.record("no key derived for '\(label)'")
+        continue
+      }
+      #expect(facts[key] != nil, "profile has no answer for '\(label)' (key \(key))")
+    }
+  }
+}

@@ -133,6 +133,14 @@ private let knownFields: [(String, Set<String>)] = [
   ("company", ["company", "employer"]),
   ("rightToWork", ["authorized", "authorised", "eligible"]),
   ("sponsorship", ["sponsorship", "sponsor", "visa"]),
+  ("dateOfBirth", ["birth", "dob", "birthday"]),
+  ("citizenship", ["citizenship", "nationality", "citizen"]),
+  ("educationStart", ["start"]),
+  ("educationEnd", ["end"]),
+  ("gender", ["gender"]),
+  ("ethnicity", ["ethnicity", "race"]),
+  ("pronouns", ["pronouns"]),
+  ("preferredName", ["preferred"]),
 ]
 
 /// Whether a key names something JevBar must never keep.

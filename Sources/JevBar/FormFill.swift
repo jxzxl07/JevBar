@@ -66,7 +66,33 @@ struct FormFill: Sendable {
     }
 
     var outcomes: [FieldOutcome] = []
-    let known = await profile.all()
+    var known = await profile.all()
+
+    /*
+     What the profile implies, for the fields no single fact answers.
+
+     "Are you legally authorized to work in the UK?" is answered by
+     `rightToWork`, but "When do you graduate?" wants a year from a date, and
+     "Are you a student?" follows from having a university and an end date in
+     the future. Those are inferences from facts already given, not new
+     information, so asking the user again would be asking them to repeat
+     themselves.
+
+     One request for all of them, and the answer must be grounded: a label the
+     profile cannot support comes back null and becomes a question, which is
+     the difference between inferring and inventing.
+    */
+    let unanswered = fields.filter { field in
+      guard let key = keys[field.id] else { return false }
+      return known[key] == nil && !isCredentialKey(key) && !credentialLabel(field.name)
+    }
+    if !unanswered.isEmpty, let think {
+      let inferred = await inferAnswers(for: unanswered, from: known, using: think)
+      for (id, answer) in inferred {
+        guard let key = keys[id] else { continue }
+        known[key] = answer
+      }
+    }
 
     for field in fields {
       guard let key = keys[field.id] else {
@@ -151,15 +177,72 @@ struct FormFill: Sendable {
   }
 }
 
+extension FormFill {
+  /// Ask the model to answer a label from facts already in the profile.
+  ///
+  /// It is given the profile and the labels, and told to answer only what the
+  /// facts support. An answer it cannot ground comes back null and the field
+  /// becomes a question — inferring is allowed, inventing is not, and the
+  /// difference matters because these answers go onto a real application.
+  ///
+  /// The profile is sent, which is personal data leaving the machine. That is
+  /// the same trade as asking any model to draft an application answer, and it
+  /// is why credentials are excluded before this point rather than trusted to a
+  /// prompt.
+  fileprivate func inferAnswers(
+    for fields: [Control], from facts: [String: String], using think: Think
+  ) async -> [String: String] {
+    let profileText =
+      facts.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+    let labels = fields.map { "\($0.id): \($0.name)" }.joined(separator: "\n")
+
+    let system = """
+      You answer job-application fields using only the facts given.
+
+      Reply with JSON only: {"answers": {"<element id>": "<answer or null>"}}
+
+      Rules:
+      - Use only what the facts support. Derive freely from them: a graduation
+        year from a graduation date, "Yes" from a right-to-work fact, a full
+        name from a first and last name.
+      - Answer null when the facts do not support an answer. Never guess a date,
+        a number, an address or an identifier that is not there.
+      - Keep answers in the form the field asks for: a year alone for a year
+        field, "Yes" or "No" for a yes/no question.
+      - Never answer a field asking for a password, passcode or one-time code.
+      """
+
+    guard
+      let reply = try? await think.ask(
+        system: system, user: "Facts:\n\(profileText)\n\nFields:\n\(labels)"),
+      let answers = reply["answers"] as? [String: Any]
+    else { return [:] }
+
+    var grounded: [String: String] = [:]
+    for (id, value) in answers {
+      guard let text = value as? String, !text.isEmpty, text.lowercased() != "null",
+        let field = fields.first(where: { $0.id == id }),
+        !credentialLabel(field.name)
+      else { continue }
+      grounded[id] = text
+    }
+    return grounded
+  }
+}
+
 /// Every key a fact may be stored under. A closed list, deliberately.
 ///
 /// The model chooses from it and never adds to it: a key it invented would be a
 /// new place to keep someone's personal data, named by something that is not
 /// the person whose data it is.
 let knownFactKeys = [
-  "firstName", "lastName", "fullName", "email", "phone", "location", "country",
-  "postcode", "address", "linkedin", "github", "portfolio", "university",
-  "degree", "discipline", "graduationYear", "company", "rightToWork", "sponsorship",
+  "firstName", "lastName", "fullName", "preferredName", "email", "phone",
+  "location", "country", "citizenship", "postcode", "address",
+  "linkedin", "github", "portfolio",
+  "university", "degree", "discipline", "educationStart", "educationEnd",
+  "graduationDate", "graduationYear", "company",
+  "dateOfBirth", "rightToWork", "sponsorship", "gender", "ethnicity",
+  "cvPath", "coverLetterPath", "pronouns", "whyThisCompany",
 ]
 
 /// Whether a field's own label asks for a credential.

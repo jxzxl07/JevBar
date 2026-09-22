@@ -175,9 +175,27 @@ actor Agent {
       let result = await filler.fill(screen: screen, task: step.kind)
 
       guard !result.outcomes.isEmpty else {
-        return await fail(
-          "I could not find any fields I can fill in \(screen.app).",
-          runId: runId, step: number, performed: performed)
+        /*
+         Say which of the two things went wrong.
+
+         "I could not find any fields" is true of a screen with nothing on it
+         and of a screen full of controls whose roles this code does not know,
+         and those need opposite fixes. JevDesk spent a long time on messages
+         that were true and useless; the counts turn one sentence into a
+         diagnosis.
+        */
+        let roles = Set(screen.controls.map(\.role)).sorted().prefix(8).joined(separator: ", ")
+        await log.step(
+          runId: runId, step: number,
+          detail: "no fillable fields: \(screen.controls.count) control(s), roles: \(roles)")
+
+        let why =
+          screen.controls.isEmpty
+          ? "I could not read anything in \(screen.app). If it is a browser, click the page "
+            + "itself once and try again."
+          : "I read \(screen.controls.count) control(s) in \(screen.app) but none is a text "
+            + "field I can fill."
+        return await fail(why, runId: runId, step: number, performed: performed)
       }
 
       for outcome in result.outcomes {
