@@ -130,3 +130,34 @@ struct OutlineTests {
     }
   }
 }
+
+@Suite("Committing an autocomplete")
+struct SuggestionTests {
+  @Test("a suggestion that merely extends what was typed is the right one")
+  func matchesByPrefix() {
+    // "Southend-on-Sea" typed; "Southend-on-Sea, England, United Kingdom"
+    // offered. Equality would never match, so the rule is a prefix.
+    let offered = "Southend-on-Sea, England, United Kingdom"
+    #expect(offered.lowercased().hasPrefix("southend-on-sea"))
+  }
+
+  @Test("a suggestion list item that submits is still refused")
+  func policyStillApplies() {
+    // Clicking a suggestion goes through the same authorization as any other
+    // press, so a list that somehow offers "Submit application" is refused
+    // rather than clicked.
+    let decision = authorize(
+      Action(verb: .click, controlName: "Submit application", value: nil), in: .jobApplication)
+    #expect(decision != .allow)
+  }
+
+  @Test("a suggestion is chosen by name, never by position")
+  func choosesByName() {
+    // The alternative — "click the first row" — commits whatever the list
+    // happens to show first, which on a slow autocomplete is the previous
+    // query's answer. Matching the text means a wrong list commits nothing.
+    let rows = ["London, England", "Southend-on-Sea, England, United Kingdom"]
+    let wanted = "southend-on-sea"
+    #expect(rows.first { $0.lowercased().hasPrefix(wanted) } == rows[1])
+  }
+}

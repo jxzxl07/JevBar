@@ -235,8 +235,55 @@ struct FormFill: Sendable {
             : .skipped("the page would not keep this value")))
     }
 
+    if let settled { await commitSuggestions(on: settled, for: retyped, task: task) }
     return outcomes
   }
+
+  /// Choose the suggestion an autocomplete is offering, rather than pressing Enter.
+  ///
+  /// ## Why not Enter
+  ///
+  /// Typing "Southend" into a location field opens a list and leaves the field
+  /// holding a fragment; something has to commit the choice. The obvious
+  /// keystroke is Return — and in a text input Return submits the form on a
+  /// large fraction of sites. On a job application that is the single action
+  /// JevBar must never take, and "press Return after every field" would put a
+  /// submission one keystroke away sixty times per form. §3 is not a rule to be
+  /// worked around with a keystroke that usually does something else.
+  ///
+  /// Clicking the suggestion is what a person does, it commits the same choice,
+  /// and it goes through the policy like every other press — so a list item that
+  /// somehow reads "Submit application" is refused rather than clicked.
+  private func commitSuggestions(
+    on screen: Screen,
+    for fields: [(id: String, label: String, key: String, value: String)],
+    task: TaskKind
+  ) async {
+    for field in fields {
+      // The suggestion says more than was typed — "Southend-on-Sea, England,
+      // United Kingdom" for "Southend-on-Sea" — so a match is a prefix, not an
+      // equality. Case-folded, because a list often title-cases what it shows.
+      let wanted = field.value.lowercased()
+      guard
+        let suggestion = screen.controls.first(where: { control in
+          Self.suggestionRoles.contains(control.role)
+            && control.name.lowercased().hasPrefix(wanted)
+            && control.id != field.id
+        })
+      else { continue }
+
+      guard case .allow = authorize(
+        Action(verb: .click, controlName: suggestion.name, value: nil), in: task)
+      else { continue }
+
+      _ = try? await engine.call("click", ["element_id": suggestion.id])
+    }
+  }
+
+  /// Roles a page uses for the rows of an autocomplete.
+  static let suggestionRoles: Set<String> = [
+    "MenuItem", "Row", "Cell", "ListItem", "StaticText", "Link", "Button",
+  ]
 
   private func reread(app: String) async throws -> Screen {
     let outline = try await engine.call(
