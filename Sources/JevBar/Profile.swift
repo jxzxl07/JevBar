@@ -1,32 +1,39 @@
 import Foundation
-import Security
 
 /// What JevBar knows about you, and how it learns the rest.
 ///
-/// ## Where it lives
+/// ## Where it lives, and why not the Keychain
 ///
-/// One Keychain item, holding JSON. Not a file beside the app, and not a
-/// database: an application form is where someone's address, phone number and
-/// right-to-work status go, and those belong behind the same door as a password
-/// even though none of them is one.
+/// A file in the app's own support directory, readable only by you.
+///
+/// The Keychain was the first answer and it was wrong in practice. macOS
+/// prompts for the login password whenever an application that is not on an
+/// item's access list reads it, and getting an application *onto* that list
+/// non-interactively needs the login password too. The result was a prompt on
+/// every single form — which trains the habit of typing a password at whatever
+/// asks, and that is a worse outcome than where the file sits.
+///
+/// The facts here are personal but they are not secrets: a name, an email, a
+/// university, a graduation year. The one thing that genuinely is a secret — a
+/// password, a passkey, a one-time code — is refused before it can be stored,
+/// so the store that would need protecting never holds anything that needs it.
+/// The file is 0600 and sits beside the API keys, which is the same trade
+/// already made for those.
 ///
 /// ## Ask once, remember forever
 ///
-/// A field nothing answers becomes a question at the end of a run. The answer is
-/// stored under a key derived from what the *field* means rather than from the
-/// site it appeared on, so "Current location" answered on one application fills
-/// "Where are you based?" on the next. The first form asks a lot; the fifth
-/// should ask nothing.
-///
-/// ## What is never stored
-///
-/// Passwords, passkeys and one-time codes. The refusal happens before a field
-/// can become a question, because the whole purpose of this store is to keep
-/// what it is told — which makes it exactly the wrong place for a credential.
+/// A field nothing answers becomes a question at the end of a run. The answer
+/// is stored under a key derived from what the *field* means rather than from
+/// the site it appeared on, so "Current location" answered on one application
+/// fills "Where are you based?" on the next. The first form asks a lot; the
+/// fifth should ask nothing.
 actor Profile {
-  private let service = "com.jevbar.profile"
-  private let account = "facts"
+  private let file: URL
   private var cache: [String: String]?
+
+  init(file: URL = supportDirectory().appendingPathComponent("profile.json")) {
+    self.file = file
+  }
 
   func all() -> [String: String] {
     if let cache { return cache }
@@ -50,6 +57,9 @@ actor Profile {
     return true
   }
 
+  /// Where the facts are, for a test that checks how they are protected.
+  var filePath: String { file.path }
+
   func forget(key: String) {
     var facts = all()
     facts.removeValue(forKey: key)
@@ -58,38 +68,29 @@ actor Profile {
   }
 
   private func read() -> [String: String] {
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: account,
-      kSecReturnData as String: true,
-      kSecMatchLimit as String: kSecMatchLimitOne,
-    ]
-    var item: CFTypeRef?
-    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-      let data = item as? Data,
+    guard let data = try? Data(contentsOf: file),
       let facts = try? JSONDecoder().decode([String: String].self, from: data)
     else { return [:] }
     return facts
   }
 
   private func write(_ facts: [String: String]) {
-    guard let data = try? JSONEncoder().encode(facts) else { return }
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: account,
-    ]
-    let attributes: [String: Any] = [kSecValueData as String: data]
+    guard
+      let data = try? JSONEncoder(sortingKeys: true).encode(facts)
+    else { return }
+    try? data.write(to: file, options: [.atomic, .completeFileProtection])
+    // Readable by this user alone. Written every time rather than once at
+    // creation, because an atomic write replaces the file and its mode with it.
+    try? FileManager.default.setAttributes(
+      [.posixPermissions: 0o600], ofItemAtPath: file.path)
+  }
+}
 
-    if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
-      var insert = query
-      insert[kSecValueData as String] = data
-      // Available without unlocking the device again, but never synced to
-      // another machine: these are this Mac's answers to this Mac's forms.
-      insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-      SecItemAdd(insert as CFDictionary, nil)
-    }
+extension JSONEncoder {
+  /// Sorted keys, so the file is readable and a diff means something.
+  fileprivate convenience init(sortingKeys: Bool) {
+    self.init()
+    if sortingKeys { outputFormatting = [.prettyPrinted, .sortedKeys] }
   }
 }
 

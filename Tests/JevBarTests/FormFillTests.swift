@@ -50,17 +50,37 @@ struct FactKeyTests {
 
 @Suite("The profile remembers, and refuses")
 struct ProfileTests {
+  /// A profile of its own, so a test never edits the real one.
+  private func scratchProfile() -> Profile {
+    Profile(
+      file: URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("jevbar-test-\(UUID().uuidString).json"))
+  }
+
   @Test("it will not store a credential even when told to")
   func refusesToStoreCredentials() async {
-    let profile = Profile()
+    let profile = scratchProfile()
     #expect(await profile.learn(key: "password", value: "hunter2") == false)
     #expect(await profile.value(for: "password") == nil)
   }
 
+  @Test("the file it writes is readable by nobody else")
+  func fileIsPrivate() async {
+    // It holds a home address and a date of birth. Sitting in a user-readable
+    // directory is the trade the Keychain's constant prompting forced; being
+    // world-readable inside it is not part of that trade.
+    let profile = scratchProfile()
+    #expect(await profile.learn(key: "location", value: "Southend-on-Sea"))
+
+    let path = await profile.filePath
+    let mode = try? FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int
+    #expect(mode == 0o600, "profile.json should be owner-only")
+  }
+
   @Test("what it learns once it knows afterwards")
   func remembers() async {
-    let profile = Profile()
-    let key = "testOnly_\(Int.random(in: 0..<1_000_000))"
+    let profile = scratchProfile()
+    let key = "location"
     #expect(await profile.learn(key: key, value: "Cambridge"))
     #expect(await profile.value(for: key) == "Cambridge")
     await profile.forget(key: key)
