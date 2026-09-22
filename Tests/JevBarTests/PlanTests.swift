@@ -68,3 +68,89 @@ struct PlanTests {
     #expect(steps[1].goal.contains("delete"))
   }
 }
+
+@Suite("Naming a place")
+struct DestinationTests {
+  @Test("a site is a site, not an application")
+  func sitesBeatApps() {
+    // "open LinkedIn" names a website, and there is also a LinkedIn app. A
+    // table that preferred the app would open the wrong one for most people.
+    let step = planSteps(from: "open linkedin")[0]
+    #expect(step.site == "https://www.linkedin.com")
+    #expect(step.app == nil)
+  }
+
+  @Test("an application is still an application")
+  func appsStillWork() {
+    let step = planSteps(from: "open Notes")[0]
+    #expect(step.site == nil)
+    #expect(step.app == "Notes")
+  }
+
+  @Test("Trackr goes to the board, not the front page")
+  func trackrGoesToTheBoard() {
+    // The front page is never what is wanted, and a run that lands there has
+    // failed at the only thing asked of it. Both spellings, because the site
+    // drops the 'e' and people do not.
+    let board = "https://app.the-trackr.com/uk-tech/summer-internships"
+    #expect(planSteps(from: "go to trackr")[0].site == board)
+    #expect(planSteps(from: "can you go to Tracker for me")[0].site == board)
+  }
+
+  @Test("a spoken domain is a destination")
+  func spokenDomains() {
+    // A domain nothing in the table knows about. "bbc.co.uk" would match the
+    // table's own `bbc` first, which is right but tests the wrong thing.
+    #expect(planSteps(from: "go to monzo.com")[0].site == "https://monzo.com")
+  }
+
+  @Test("an ordinary sentence with a full stop is not a domain")
+  func doesNotInventDomains() {
+    // An open suffix list matches ordinary words: "first.article" looks like a
+    // domain to a permissive pattern.
+    #expect(planSteps(from: "open Notes. write something")[0].site == nil)
+  }
+}
+
+@Suite("Opening and closing things")
+struct OpenCloseTests {
+  @Test("any installed application is found, not just a listed one")
+  func findsInstalledApps() {
+    // A hardcoded list is wrong the moment anything is installed. macOS knows
+    // what is here; asking it is shorter and always right.
+    #expect(Apps.resolve("notes")?.name == "Notes")
+    #expect(Apps.resolve("safari")?.name == "Safari")
+    #expect(Apps.resolve("definitely not installed xyzzy") == nil)
+  }
+
+  @Test("the shorter name wins when both merely match")
+  func prefersExactNames() {
+    // "notes" must find Notes rather than GoodNotes, on a Mac that has both.
+    #expect(Apps.resolve("notes")?.name == "Notes")
+  }
+
+  @Test("closing is recognised and is not an opening")
+  func recognisesClosing() {
+    let step = planSteps(from: "close Notes")[0]
+    #expect(step.closes)
+    #expect(step.app == "Notes")
+    #expect(step.site == nil)
+  }
+
+  @Test("a folder is a folder, not an app or a site")
+  func recognisesFolders() {
+    let step = planSteps(from: "open my downloads")[0]
+    #expect(step.folder?.hasSuffix("Downloads") == true)
+    #expect(step.app == nil)
+    #expect(step.site == nil)
+  }
+
+  @Test("opening and closing in one sentence is two steps")
+  func mixesVerbs() {
+    let steps = planSteps(from: "open Notes and then close Safari")
+    #expect(steps.count == 2)
+    #expect(steps[0].closes == false)
+    #expect(steps[1].closes)
+    #expect(steps[1].app == "Safari")
+  }
+}

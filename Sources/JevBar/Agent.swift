@@ -98,7 +98,47 @@ actor Agent {
     var quietTurns = 0
     var lastFingerprint = ""
 
-    if let app = step.app {
+    if step.closes {
+      guard let app = step.app else {
+        return await fail(
+          "I could not tell what to close.", runId: runId, step: number, performed: performed)
+      }
+      // Requested rather than forced: an application asked to quit runs its own
+      // save-and-quit path, which is what Cmd-Q gives. `forceTerminate` would
+      // discard unsaved work and is deliberately not used.
+      let running = NSWorkspace.shared.runningApplications.filter {
+        $0.localizedName == app || $0.bundleIdentifier == app
+      }
+      guard !running.isEmpty else {
+        return RunResult(outcome: .done, message: "\(app) was not open.", steps: performed)
+      }
+      running.forEach { $0.terminate() }
+      await log.step(runId: runId, step: number, detail: "quit \(app)")
+      return RunResult(outcome: .done, message: "Closed \(app).", steps: ["closed \(app)"])
+    }
+
+    if let folder = step.folder {
+      NSWorkspace.shared.open(URL(fileURLWithPath: folder))
+      await log.step(runId: runId, step: number, detail: "opened folder \(folder)")
+      let name = URL(fileURLWithPath: folder).lastPathComponent
+      performed.append("opened \(name)")
+      // Opening a folder is the whole of the clause. Looking at the screen
+      // afterwards would send Finder's window to a model with nothing to decide.
+      return RunResult(outcome: .done, message: "Opened \(name).", steps: performed)
+    }
+
+    if let site = step.site {
+      guard let url = URL(string: site) else {
+        return await fail(
+          "I could not make sense of \(site).", runId: runId, step: number, performed: performed)
+      }
+      NSWorkspace.shared.open(url)
+      performed.append("opened \(url.host ?? site)")
+      await log.step(runId: runId, step: number, detail: "opened \(url.host ?? site)")
+      // A page asked to load is not a page that has loaded, and observing too
+      // early reads whatever was on screen before.
+      try? await Task.sleep(for: .milliseconds(1_800))
+    } else if let app = step.app {
       do {
         try await open(app: app)
         performed.append("opened \(app)")
@@ -188,8 +228,8 @@ actor Agent {
   /// launched app is not reliably frontmost by the time the next observation
   /// happens.
   private func open(app: String) async throws {
-    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app)
-      ?? applicationURL(named: app)
+    if let url = Apps.resolve(app)?.url
+      ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: app)
     {
       let configuration = NSWorkspace.OpenConfiguration()
       configuration.activates = true
@@ -202,20 +242,40 @@ actor Agent {
     _ = try await engine.call("activate_app", ["app": app])
   }
 
-  private func applicationURL(named name: String) -> URL? {
-    let directories = ["/Applications", "/System/Applications", "/System/Applications/Utilities"]
-    for directory in directories {
-      let candidate = URL(fileURLWithPath: directory).appendingPathComponent("\(name).app")
-      if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+
+
+  /// Read the screen of the application this step is about.
+  ///
+  /// `get_app_state` requires an app, and a clause naming a *site* names no
+  /// application at all — "open youtube" failed with `missing required argument
+  /// 'app'` for exactly that reason. When nothing is named, the frontmost app is
+  /// the subject, which is also what the user means by "this form".
+  private func observe(app: String?) async throws -> Screen {
+    let target: String
+    if let app {
+      target = app
+    } else {
+      target = try await frontmostApp()
     }
-    return nil
+    let outline = try await engine.call(
+      "get_app_state", ["app": target, "max_elements": 300])
+    return parseScreen(app: target, outline: outline)
   }
 
-  private func observe(app: String?) async throws -> Screen {
-    var arguments: [String: Any] = ["max_elements": 300]
-    if let app { arguments["app"] = app }
-    let outline = try await engine.call("get_app_state", arguments)
-    return parseScreen(app: app ?? "frontmost", outline: outline)
+  private func frontmostApp() async throws -> String {
+    if let running = NSWorkspace.shared.frontmostApplication?.localizedName,
+      running != "JevBar"
+    {
+      return running
+    }
+    // JevBar itself is frontmost while its own panel is open, and observing our
+    // own window would answer questions about the command field. The engine's
+    // own listing knows which application is behind us.
+    let listing = try await engine.call("list_apps", [:])
+    for line in listing.split(separator: "\n") where line.lowercased().contains("frontmost") {
+      if let name = line.split(separator: " ").first { return String(name) }
+    }
+    throw Engine.Failure.tool("I could not tell which application is in front.")
   }
 
   private enum Performed {

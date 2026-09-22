@@ -6,6 +6,12 @@ struct Step: Equatable, Sendable {
   let goal: String
   /// The application this clause is about, when the sentence named one.
   let app: String?
+  /// The address this clause is about, when it named a site rather than an app.
+  let site: String?
+  /// A folder this clause asks to open.
+  let folder: String?
+  /// True when the clause asks to close or quit rather than to open.
+  let closes: Bool
   /// Whether this clause is filling in an application, which changes what is
   /// refused.
   let kind: TaskKind
@@ -39,11 +45,23 @@ func planSteps(from command: String) -> [Step] {
   var steps: [Step] = []
 
   for clause in clauses {
-    if let named = namedApp(in: clause) { currentApp = named }
+    // A site is checked first: "open LinkedIn" names a website, and there is
+    // also a LinkedIn application, so a table lookup that preferred the app
+    // would open the wrong one for most people most of the time.
+    let closes = asksToClose(clause)
+    // A folder is checked before a site, because "open my downloads" names
+    // neither an application nor an address.
+    let folder = Folders.resolve(clause).map(\.path)
+    let site = folder == nil && !closes ? namedSite(in: clause) : nil
+    if site == nil, folder == nil, let named = namedApp(in: clause) { currentApp = named }
+
     steps.append(
       Step(
         goal: clause,
         app: currentApp,
+        site: site,
+        folder: folder,
+        closes: closes,
         kind: looksLikeApplication(clause) ? .jobApplication : .general))
   }
   return steps
@@ -124,6 +142,16 @@ func splitClauses(_ command: String) -> [String] {
   return clauses
 }
 
+/// Whether the clause asks for something to be closed rather than opened.
+///
+/// Quitting is not destructive — an application asked to quit runs its own
+/// save-and-quit path, which is what Cmd-Q gives — so it is an ordinary verb
+/// rather than one the policy has to weigh.
+private func asksToClose(_ clause: String) -> Bool {
+  let words = clause.lowercased().split { !$0.isLetter }.map(String.init)
+  return words.contains { ["close", "quit", "exit"].contains($0) }
+}
+
 /// Whether this clause is about filling in a job application.
 ///
 /// It decides which refusals apply, so it is deliberately generous: a clause
@@ -144,11 +172,34 @@ private let knownApps: [String: String] = [
   "system settings": "System Settings", "settings": "System Settings",
 ]
 
+/// The application a clause names, out of everything installed.
+///
+/// The table is consulted first because it holds the names that are *said*
+/// rather than the names on disk — "chrome" for `Google Chrome`, "settings" for
+/// `System Settings`. Anything it does not know is looked up on the filesystem,
+/// so "open GoodNotes" works on a Mac that has GoodNotes without anybody having
+/// added it to a list.
 private func namedApp(in clause: String) -> String? {
   let lower = clause.lowercased()
-  // Longest first, so "google chrome" wins over "chrome".
   for name in knownApps.keys.sorted(by: { $0.count > $1.count }) where lower.contains(name) {
     return knownApps[name]
+  }
+
+  // The words after the verb are the candidate name: "open goodnotes" asks
+  // about "goodnotes", and passing the whole clause would match an application
+  // whose name happens to contain a common word.
+  let words = lower.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+  let skip: Set<String> = [
+    "open", "close", "quit", "exit", "launch", "start", "please", "can", "you",
+    "my", "the", "app", "application", "for", "me", "up",
+  ]
+  let remaining = words.filter { !skip.contains($0) }
+  guard !remaining.isEmpty else { return nil }
+
+  // Longest phrase first: "microsoft word" before "microsoft".
+  for length in stride(from: remaining.count, through: 1, by: -1) {
+    let phrase = remaining.prefix(length).joined(separator: " ")
+    if let match = Apps.resolve(phrase) { return match.name }
   }
   return nil
 }
