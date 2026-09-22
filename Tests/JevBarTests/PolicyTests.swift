@@ -67,3 +67,33 @@ struct PolicyTests {
     #expect(decision == .allow)
   }
 }
+
+@Suite("Committing a list with Return")
+struct ReturnKeyTests {
+  @Test("Return is refused on a submit-shaped control, exactly like a click")
+  func returnIsStillAPress() {
+    // Return commits a dropdown, and in a text input it submits the form. The
+    // safety here is not a promise that pages behave: it is that a keystroke is
+    // authorized as the press it is, so the control that must never be pressed
+    // cannot be pressed with a different verb.
+    for name in ["Submit application", "Apply now", "Send application"] {
+      let decision = authorize(
+        Action(verb: .pressKey, controlName: name, value: "return"), in: .jobApplication)
+      #expect(decision != .allow, "expected Return on '\(name)' to be refused")
+    }
+  }
+
+  @Test("Return is allowed on an ordinary dropdown")
+  func returnOnADropdown() {
+    let decision = authorize(
+      Action(verb: .pressKey, controlName: "Degree", value: "return"), in: .jobApplication)
+    #expect(decision == .allow)
+  }
+
+  @Test("Return never reaches a control that sends something")
+  func returnDoesNotSend() {
+    let decision = authorize(
+      Action(verb: .pressKey, controlName: "Send message", value: "return"), in: .general)
+    #expect(decision != .allow)
+  }
+}

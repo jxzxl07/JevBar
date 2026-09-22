@@ -42,7 +42,11 @@ enum Decision: Equatable, Sendable {
 func authorize(_ action: Action, in task: TaskKind) -> Decision {
   if let refusal = credentialRefusal(action) { return .refuse(refusal) }
 
-  if action.verb == .click, task == .jobApplication,
+  // A keystroke that commits a list is still a press, and a press on a
+  // submit-shaped control is still refused. Naming both verbs here rather than
+  // trusting the caller is the point: the caller is the thing being guarded.
+  if action.verb == .click || action.verb == .pressKey,
+    task == .jobApplication,
     looksLikeFinalSubmit(action.controlName)
   {
     return .refuse(
@@ -50,7 +54,9 @@ func authorize(_ action: Action, in task: TaskKind) -> Decision {
         + "stops; sending it is yours.")
   }
 
-  if action.verb == .click, looksLikeCommunication(action.controlName) {
+  if action.verb == .click || action.verb == .pressKey,
+    looksLikeCommunication(action.controlName)
+  {
     return .refuse(
       "'\(action.controlName)' would send something to another person, which JevBar never does. "
         + "It prepares; you send.")

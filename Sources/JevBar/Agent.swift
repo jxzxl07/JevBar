@@ -301,6 +301,18 @@ actor Agent {
     return stored
   }
 
+  /// A control, in words, even when the page gave it no name.
+  ///
+  /// YouTube's search box has no accessible name, so every step read "filled "
+  /// with nothing after it — four identical blank lines that said only that
+  /// something had happened somewhere.
+  private func describe(_ control: Control) -> String {
+    let name = control.name.trimmingCharacters(in: .whitespaces)
+    if !name.isEmpty { return name }
+    let role = control.role.isEmpty ? "control" : control.role.lowercased()
+    return "the \(role)"
+  }
+
   private func describe(_ outcome: FieldOutcome) -> String {
     // Labels and keys, never values: a log carrying what was typed into an
     // application form carries someone's address in plain text, forever.
@@ -423,15 +435,15 @@ actor Agent {
       switch verb {
       case .click:
         _ = try await engine.call("click", ["element_id": id])
-        return .success("pressed \(control.name)")
+        return .success("pressed \(describe(control))")
       case .setValue:
         // `set_value` replaces the whole field rather than inserting at the
         // caret, so filling the same box twice cannot produce `MKBHDMKBHD`.
         _ = try await engine.call("set_value", ["element_id": id, "value": move.text ?? ""])
-        return .success("filled \(control.name)")
+        return .success("filled \(describe(control))")
       case .typeText:
         _ = try await engine.call("type_text", ["element_id": id, "text": move.text ?? ""])
-        return .success("typed into \(control.name)")
+        return .success("typed into \(describe(control))")
       default:
         return .failure("unsupported")
       }

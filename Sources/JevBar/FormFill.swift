@@ -88,7 +88,14 @@ struct FormFill: Sendable {
 
     var outcomes: [FieldOutcome] = []
     /// Written but not yet proved: nothing counts as filled until it reads back.
-    var written: [String: (label: String, key: String, value: String)] = [:]
+    /*
+     An array, not a dictionary, because a form is filled in its own order.
+
+     This was keyed by element id, and a dictionary has no order — so the boxes
+     were filled third, first, second, which looks broken even when every value
+     is right. Document order is the order the fields were observed in.
+    */
+    var written: [(id: String, label: String, key: String, value: String)] = []
     var known = await profile.all()
 
     /*
@@ -163,7 +170,7 @@ struct FormFill: Sendable {
       if let draft = drafted[field.id] {
         do {
           _ = try await engine.call("set_value", ["element_id": field.id, "value": draft])
-          written[field.id] = (label: field.name, key: "drafted", value: draft)
+          written.append((id: field.id, label: field.name, key: "drafted", value: draft))
         } catch {
           outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
         }
@@ -246,7 +253,7 @@ struct FormFill: Sendable {
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
         _ = try await engine.call("set_value", ["element_id": field.id, "value": value])
-        written[field.id] = (label: field.name, key: key, value: value)
+        written.append((id: field.id, label: field.name, key: key, value: value))
       } catch {
         outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
       }
@@ -275,7 +282,7 @@ struct FormFill: Sendable {
   /// sixty of them, and sixty round trips is the thirty-one seconds this design
   /// exists to avoid.
   private func verify(
-    _ written: [String: (label: String, key: String, value: String)],
+    _ written: [(id: String, label: String, key: String, value: String)],
     app: String,
     task: TaskKind
   ) async -> [FieldOutcome] {
@@ -288,7 +295,7 @@ struct FormFill: Sendable {
     guard let after = try? await reread(app: app) else {
       // The page could not be read again. Saying "filled" here would be the
       // same unverified claim, so these are reported as unknown instead.
-      return written.values.map {
+      return written.map {
         .init(label: $0.label, state: .skipped("written, but I could not check it landed"))
       }
     }
@@ -305,10 +312,7 @@ struct FormFill: Sendable {
      retyped, which is exactly the set a combobox is not in: it accepts the
      write, so it never reached the fallback and never got its list committed.
     */
-    let everythingWritten = written.map {
-      (id: $0.key, label: $0.value.label, key: $0.value.key, value: $0.value.value)
-    }
-    await commitSuggestions(on: after, for: everythingWritten, task: task)
+    await commitSuggestions(on: after, for: written, task: task)
 
     // Read again: committing a choice replaces the fragment in the box with the
     // option's own text, and judging the write against the fragment would call
@@ -319,8 +323,8 @@ struct FormFill: Sendable {
     var outcomes: [FieldOutcome] = []
     var stubborn: [(id: String, label: String, key: String, value: String)] = []
 
-    for (id, write) in written {
-      let now = committed.control(id: id)?.value
+    for write in written {
+      let now = committed.control(id: write.id)?.value
       // A committed option often says more than was typed — "United Kingdom"
       // for "United", "Bachelor's Degree (BA)" for "Bachelor's Degree" — so a
       // prefix counts as landed.
@@ -330,7 +334,7 @@ struct FormFill: Sendable {
       if landed {
         outcomes.append(.init(label: write.label, state: .filled(from: write.key)))
       } else {
-        stubborn.append((id, write.label, write.key, write.value))
+        stubborn.append((write.id, write.label, write.key, write.value))
       }
     }
 
@@ -399,7 +403,10 @@ struct FormFill: Sendable {
             && control.name.lowercased().hasPrefix(wanted)
             && control.id != field.id
         })
-      else { continue }
+      else {
+        await commitWithReturn(field, on: screen, task: task)
+        continue
+      }
 
       guard case .allow = authorize(
         Action(verb: .click, controlName: suggestion.name, value: nil), in: task)
@@ -407,6 +414,44 @@ struct FormFill: Sendable {
 
       _ = try? await engine.call("click", ["element_id": suggestion.id])
     }
+  }
+
+  /// Press Return on a list whose highlighted option is not in the tree.
+  ///
+  /// ## Why this exists, having been refused twice
+  ///
+  /// Some comboboxes render their menu somewhere the accessibility tree does
+  /// not reach, so there is no option to click: the value is typed, the right
+  /// row is visibly highlighted, and nothing commits it. Stripe's Degree field
+  /// does exactly this. Return is what a person presses there.
+  ///
+  /// The objection to Return was never that it does not work — it is that in a
+  /// *text input* it submits the form, and on a job application that is the one
+  /// action JevBar must never take. So this is not "press Return after every
+  /// field". It fires only when all of these hold:
+  ///
+  ///  - the control is a combobox or a chooser, never a plain text field;
+  ///  - a list was open and offered nothing this code could click;
+  ///  - the control's own accessible name is not submit-shaped;
+  ///  - the policy allows it, checked as an ordinary effect.
+  ///
+  /// A plain text field never reaches here, which is the property that makes
+  /// this safe rather than the promise that a page will behave.
+  private func commitWithReturn(
+    _ field: (id: String, label: String, key: String, value: String),
+    on screen: Screen,
+    task: TaskKind
+  ) async {
+    guard let control = screen.control(id: field.id) else { return }
+    guard Self.chooserRoles.contains(control.role) || control.role == "ComboBox" else { return }
+
+    // The same authorization any press gets. A control named "Submit
+    // application" is refused here exactly as it would be under a click.
+    guard case .allow = authorize(
+      Action(verb: .pressKey, controlName: control.name, value: "return"), in: task)
+    else { return }
+
+    _ = try? await engine.call("press_key", ["key": "return", "element_id": field.id])
   }
 
   /// Roles a page uses for the rows of an autocomplete.

@@ -82,7 +82,22 @@ struct Think: Sendable {
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
     let (data, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+    guard let http = response as? HTTPURLResponse else {
+      throw ThinkError.unreadable
+    }
+
+    /*
+     A quota refusal said as one sentence, not as three hundred characters of JSON.
+
+     "Search sidemen on YouTube" failed with `The model refused the request: [{
+     "error": { "code": 429,…` — which is true, unreadable, and gives no idea
+     that the fix is to wait. The loop asks the model once per turn, so a run of
+     any length is several requests and a free tier is reached quickly.
+    */
+    if http.statusCode == 429 {
+      throw ThinkError.rateLimited
+    }
+    guard (200..<300).contains(http.statusCode) else {
       let detail = String(data: data, encoding: .utf8) ?? ""
       throw ThinkError.refused(String(detail.prefix(300)))
     }
@@ -102,6 +117,7 @@ struct Think: Sendable {
 
 enum ThinkError: Error, CustomStringConvertible {
   case notConfigured
+  case rateLimited
   case refused(String)
   case unreadable
 
@@ -111,6 +127,10 @@ enum ThinkError: Error, CustomStringConvertible {
       return
         "No model key is configured. Put GEMINI_API_KEY in "
         + "~/Library/Application Support/JevBar/.env"
+    case .rateLimited:
+      return
+        "The model is rate limited — too many requests for now. Wait a minute and try again, "
+        + "or add billing to the API key."
     case .refused(let detail): return "The model refused the request: \(detail)"
     case .unreadable: return "The model replied with something that was not the shape asked for."
     }
