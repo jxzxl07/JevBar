@@ -19,7 +19,7 @@ check:
 	@swift build 2>&1 | grep -E "error|warning:" || true
 	@swift test
 
-# Rebuild and install without taking focus, for when you are mid-form.
+# Rebuild and restart without taking focus, for when you are mid-form.
 run:
 	@JEVBAR_NO_LAUNCH=1 ./package.sh
 

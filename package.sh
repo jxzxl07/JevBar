@@ -92,9 +92,14 @@ rm -rf "$INSTALLED"
 mkdir -p "$HOME/Applications"
 ditto --noextattr --norsrc --noacl "$APP" "$INSTALLED"
 
-if [ "${JEVBAR_NO_LAUNCH:-}" != "1" ]; then
+# `-g` starts it without bringing it to the front. The alternative — not
+# starting it at all — left JevBar dead after `make run`, which is the opposite
+# of "rebuild without interrupting me": the app you were using is gone and the
+# menu bar icon with it.
+if [ "${JEVBAR_NO_LAUNCH:-}" = "1" ]; then
+  open -g "$INSTALLED"
+  echo "JevBar reloaded in the background — $INSTALLED"
+else
   open "$INSTALLED"
   echo "JevBar restarted — $INSTALLED"
-else
-  echo "JevBar installed — $INSTALLED"
 fi
