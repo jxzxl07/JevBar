@@ -77,7 +77,7 @@ struct FormFill: Sendable {
          were filled again and again while the rest of the form was never
          reached at all.
         */
-        && !alreadyDone.contains($0.name)
+        && !alreadyDone.contains(normalisedLabel($0.name))
         // A secure field is listed so it can be *recognised* and refused, never
         // so it can be filled. The engine refuses it too; this is the second of
         // two independent guards rather than the only one.
@@ -732,13 +732,13 @@ extension FormFill {
 
       let fresh = screen.controls.filter { control in
         (Self.writableRoles.contains(control.role) || Self.chooserRoles.contains(control.role))
-          && !control.name.isEmpty && !seen.contains(control.name)
+          && !control.name.isEmpty && !seen.contains(normalisedLabel(control.name))
       }
 
       if fresh.isEmpty && pass > 0 { break }
 
       let result = await fillVisible(screen: screen, task: task, alreadyDone: seen)
-      let novel = result.outcomes.filter { !seen.contains($0.label) }
+      let novel = result.outcomes.filter { !seen.contains(normalisedLabel($0.label)) }
       outcomes.append(contentsOf: novel)
 
       /*
@@ -749,7 +749,20 @@ extension FormFill {
        recorded as done and never tried again. The pass that would have reached
        it skipped it, and a whole Stripe application came back untouched.
       */
-      for outcome in novel where !isRetryable(outcome) { seen.insert(outcome.label) }
+      /*
+       Remembered in the same normalised form the fields are matched in.
+
+       This stored the label exactly as observed and compared it exactly, and
+       a page does not print a label identically on every read — a required
+       marker, a stray space. So a field finished on one pass looked new on the
+       next, and First Name, Last Name, Email and Phone were written over and
+       over while the rest of the form was never reached.
+      */
+      for outcome in novel where !isRetryable(outcome) {
+        seen.insert(normalisedLabel(outcome.label))
+      }
+
+      await log?.pass(number: pass + 1, wrote: novel.count, done: seen.count)
 
       // Nothing new on this screenful and nowhere left to go.
       if novel.isEmpty && pass > 0 { break }

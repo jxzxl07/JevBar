@@ -31,6 +31,15 @@ actor RunLog {
     append(runId, "step \(step)", detail)
   }
 
+  /// One line per pass, so a long fill shows progress instead of silence.
+  ///
+  /// Outcomes are only written when the whole form finishes, so a run that
+  /// loops logs nothing at all — which is how four fields were rewritten
+  /// repeatedly for four minutes with an empty log to show for it.
+  func pass(number: Int, wrote: Int, done: Int) {
+    append("form", "pass \(number)", "\(wrote) field(s) this pass, \(done) done")
+  }
+
   /// What the page offered when a field could not be found.
   ///
   /// Labels only, never values: this is about which control is which, and a
