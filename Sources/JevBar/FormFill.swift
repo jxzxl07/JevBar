@@ -261,20 +261,44 @@ struct FormFill: Sendable {
          handled by `fillWholeForm`, which scrolls once per pass and looks
          again.
         */
-        // Focused first: the Return below goes to whatever has focus, and a
-        // field written into without being focused is a field the keystroke
-        // will miss.
-        _ = try? await engine.call("click", ["element_id": field.id])
+        /*
+         The field is found again, by label, immediately before it is written.
+
+         Ids belong to one snapshot. The list of fields here was observed once,
+         before anything was written, and every write re-renders the form —
+         validation appears, a list opens, a row is chosen — which invalidates
+         every id after it. Writing to a stale id writes into whatever now holds
+         it, and the values land in the wrong boxes and append:
+
+             First Name:  United KingdomJazil
+             Last Name:   Southend-on-SeaImran
+             Email:       jazil.imran@gmail.comjazil.imran@gmail.com
+
+         That is a fresh observation per field, which is expensive and is the
+         only thing that is correct. A label survives a re-render; an id does
+         not.
+        */
+        guard let live = try await currentField(labelled: field.name, app: screen.app) else {
+          outcomes.append(
+            .init(label: field.name, state: .skipped("the field moved before I could write it")))
+          continue
+        }
+
+        // Focused first, so the Return below — when there is one — reaches this
+        // field rather than wherever focus happened to be.
+        _ = try? await engine.call("click", ["element_id": live.id])
 
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
-        _ = try await engine.call("set_value", ["element_id": field.id, "value": value])
+        _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
 
-        // Return commits what was typed. Focus first, because the keystroke
-        // goes to whatever has it.
-        await commitWithReturn(field: field, task: task)
+        // A list is committed by clicking the row it offers. Nothing is ever
+        // typed into a form to make it commit — see `commitByClicking`.
+        if Self.listRoles.contains(live.role) {
+          _ = await commitByClicking(field: live, value: value, app: screen.app, task: task)
+        }
 
-        written.append((id: field.id, label: field.name, key: key, value: value))
+        written.append((id: live.id, label: field.name, key: key, value: value))
       } catch {
         outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
       }
@@ -388,35 +412,52 @@ struct FormFill: Sendable {
     return outcomes
   }
 
-  /// Press Return, so the field keeps what was just typed into it.
-  ///
-  /// ## Why every field, and why this took four attempts
-  ///
-  /// `press_key` has **no element id**. Its own description says the key goes
-  /// to the focused app — and every Return sent before this passed an
-  /// `element_id`, which was ignored, with nothing having focused the field. So
-  /// the keystroke went wherever focus happened to be, and the dropdown it was
-  /// meant to commit never saw it. Three rounds of "the dropdown still is not
-  /// selected" were that: not a timing problem, and not the wrong row.
-  ///
-  /// Focus is therefore explicit: click the field, write into it, press Return.
-  ///
-  /// ## The one thing still checked
-  ///
-  /// Return in a text input submits a form on many sites, and on a job
-  /// application that is the action that must never happen. The field's own
-  /// accessible name goes through the policy first, so a control named "Submit
-  /// application" is refused. It costs nothing, and it is the only thing
-  /// between "commit this dropdown" and "send this application".
-  private func commitWithReturn(field: Control, task: TaskKind) async {
-    guard case .allow = authorize(
-      Action(verb: .pressKey, controlName: field.name, value: "return"), in: task)
-    else { return }
+  /// Roles that open a list when written into, and only these get a Return.
+  static let listRoles: Set<String> = ["ComboBox", "PopUpButton", "MenuButton"]
 
-    // A list renders on the next frame, and a Return that arrives before it
-    // does commits nothing.
-    try? await Task.sleep(for: .milliseconds(350))
-    _ = try? await engine.call("press_key", ["key": "return"])
+  /// Click the row the list is offering, having just typed into the field.
+  ///
+  /// ## Why clicking and not Return
+  ///
+  /// Return was tried. In a text input it submits the form, and a Stripe
+  /// application came back with "Last Name is required", "Select a country" and
+  /// "Please enter your location" — validation errors, which a page only shows
+  /// after a submission was attempted. It did that once per field.
+  ///
+  /// Clicking the row is what a person does and cannot submit anything: the
+  /// thing being pressed is a row in a list, and its name is checked against
+  /// the policy first, so a row that somehow read "Submit application" is
+  /// refused like any other control.
+  ///
+  /// ## Why the row is matched by text
+  ///
+  /// Pressing the first row commits whatever the list happens to show, which on
+  /// a slow autocomplete is still the previous query's answer — that is how
+  /// "Southend-on-Sea" was once committed as "North Sumatra, Indonesia". The
+  /// match is a prefix because the row says more than was typed: "United
+  /// Kingdom +44" for "United Kingdom".
+  private func commitByClicking(
+    field: Control, value: String, app: String, task: TaskKind
+  ) async -> Bool {
+    // A list renders on the next frame; looking before it does finds nothing
+    // and concludes there was nothing to commit.
+    try? await Task.sleep(for: .milliseconds(500))
+    guard let open = try? await reread(app: app) else { return false }
+
+    let wanted = value.lowercased()
+    guard
+      let row = open.controls.first(where: { control in
+        control.id != field.id
+          && Self.suggestionRoles.contains(control.role)
+          && control.name.lowercased().hasPrefix(wanted)
+      })
+    else { return false }
+
+    guard case .allow = authorize(
+      Action(verb: .click, controlName: row.name, value: nil), in: task)
+    else { return false }
+
+    return (try? await engine.call("click", ["element_id": row.id])) != nil
   }
 
   /// Roles a page uses for the rows of an autocomplete.
@@ -502,6 +543,12 @@ struct FormFill: Sendable {
   /// every field after it rather than just its own.
   private func dismissMenu() async {
     _ = try? await engine.call("press_key", ["key": "escape"])
+  }
+
+  /// This field as it is *now*, found by the label that does not change.
+  private func currentField(labelled label: String, app: String) async throws -> Control? {
+    let screen = try await reread(app: app)
+    return screen.controls.first { $0.name == label && !isPageChrome($0) }
   }
 
   private func reread(app: String) async throws -> Screen {

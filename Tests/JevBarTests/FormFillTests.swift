@@ -308,3 +308,31 @@ struct PageChromeTests {
       Control(id: "e1", role: "TextField", name: "Current location", value: nil, depth: 0)))
   }
 }
+
+@Suite("Committing a list without typing")
+struct ListCommitTests {
+  @Test("only a list role is committed at all")
+  func onlyLists() {
+    // A text field is written and left alone. Nothing is typed into a form to
+    // make it commit — Return in a text input submits it, which a Stripe
+    // application proved by coming back with "Last Name is required" and
+    // "Select a country" after every field.
+    #expect(FormFill.listRoles.contains("ComboBox"))
+    #expect(FormFill.listRoles.contains("PopUpButton"))
+    #expect(!FormFill.listRoles.contains("TextField"))
+    #expect(!FormFill.listRoles.contains("TextArea"))
+  }
+
+  @Test("a row that submits is refused like any other control")
+  func rowsGoThroughPolicy() {
+    // The row is pressed, so it is authorized as a press.
+    let decision = authorize(
+      Action(verb: .click, controlName: "Submit application", value: nil), in: .jobApplication)
+    #expect(decision != .allow)
+  }
+
+  @Test("a text field is still writable, it just gets no keystroke")
+  func textFieldsStillFill() {
+    #expect(FormFill.writableRoles.contains("TextField"))
+  }
+}
