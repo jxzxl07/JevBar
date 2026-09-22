@@ -245,3 +245,41 @@ struct WholeFormTests {
     #expect(credentialLabel("Password"))
   }
 }
+
+@Suite("Refusing an answer that cannot be right")
+struct ValueShapeTests {
+  @Test("a yes/no answer never reaches a field that wants a value")
+  func rejectsYesNoInValueFields() {
+    // A real Stripe application ended up with "No" in the Phone box — a yes/no
+    // answer that reached a field expecting digits through a label the model
+    // mapped wrongly. Nothing downstream could catch it: the write succeeded,
+    // the page kept it, and it read back exactly as asked.
+    #expect(!valueSuits(key: "phone", value: "No"))
+    #expect(!valueSuits(key: "firstName", value: "Yes"))
+    #expect(!valueSuits(key: "location", value: "N/A"))
+  }
+
+  @Test("real answers still go through")
+  func acceptsRealValues() {
+    // A check that rejected unusual but real answers would be worse than none.
+    #expect(valueSuits(key: "phone", value: "07881602694"))
+    #expect(valueSuits(key: "phone", value: "+44 7881 602694"))
+    #expect(valueSuits(key: "email", value: "jazil.imran@gmail.com"))
+    #expect(valueSuits(key: "location", value: "Southend-on-Sea"))
+    #expect(valueSuits(key: "graduationYear", value: "2028"))
+    #expect(valueSuits(key: "github", value: "www.github.com/jxzxl07"))
+  }
+
+  @Test("a yes/no answer is fine for the question that asked it")
+  func allowsYesNoForQuestions() {
+    // "Are you legally authorized to work…" is answered with exactly this, and
+    // refusing it would empty the field the profile actually knows.
+    #expect(valueSuits(key: "rightToWork", value: "Yes"))
+    #expect(valueSuits(key: "sponsorship", value: "No"))
+  }
+
+  @Test("an empty answer is never written")
+  func rejectsEmpty() {
+    #expect(!valueSuits(key: "firstName", value: "   "))
+  }
+}

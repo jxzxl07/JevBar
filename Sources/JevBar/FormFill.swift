@@ -134,8 +134,25 @@ struct FormFill: Sendable {
       isOpenEnded(field) && keys[field.id].flatMap { known[$0] } == nil
         && !credentialLabel(field.name)
     }
-    if !openEnded.isEmpty, let think, !documents.isEmpty {
-      drafted = await draftAnswers(for: openEnded, facts: known, using: think)
+
+    /*
+     Why a written question was not answered, when it was not.
+
+     Drafting depends on three things being true at once — a model key, a CV to
+     ground it, and a field recognised as wanting prose — and when any is
+     missing the field simply came out as "nothing in your profile names this".
+     That reads as the matcher failing, not as the CV never having been found,
+     and the two need opposite fixes.
+    */
+    var draftingSkipped: String?
+    if !openEnded.isEmpty {
+      if think == nil {
+        draftingSkipped = "no model is configured, so I could not write an answer"
+      } else if documents.isEmpty {
+        draftingSkipped = "I could not read your CV, so I had nothing to write from"
+      } else {
+        drafted = await draftAnswers(for: openEnded, facts: known, using: think!)
+      }
     }
 
     for field in fields {
@@ -150,6 +167,17 @@ struct FormFill: Sendable {
         } catch {
           outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
         }
+        continue
+      }
+
+      if isOpenEnded(field), drafted[field.id] == nil,
+        openEnded.contains(where: { $0.id == field.id })
+      {
+        outcomes.append(
+          .init(
+            label: field.name,
+            state: .skipped(
+              draftingSkipped ?? "my CV does not support an answer to this, so I left it")))
         continue
       }
 
@@ -177,6 +205,28 @@ struct FormFill: Sendable {
       // box filled twice reads `JazilJazil`.
       if field.value == value {
         outcomes.append(.init(label: field.name, state: .filled(from: key)))
+        continue
+      }
+
+      /*
+       A value that cannot be right for this field is not written.
+
+       A real Stripe application ended up with "No" in the Phone box — a yes/no
+       answer that reached a field expecting digits, through a label the model
+       mapped wrongly. Nothing downstream could catch it: the write succeeded,
+       the page kept it, and it read back exactly as asked, so every check said
+       filled.
+
+       This is a shape check, not a validation: it refuses "No" for a phone and
+       a sentence for an email, and lets everything plausible through. The cost
+       of being wrong in one direction is a field left empty; in the other it is
+       a wrong answer on a real application, under someone's name.
+      */
+      guard valueSuits(key: key, value: value) else {
+        outcomes.append(
+          .init(
+            label: field.name,
+            state: .skipped("the answer I have for this does not look like a \(key)")))
         continue
       }
 
@@ -243,11 +293,41 @@ struct FormFill: Sendable {
       }
     }
 
+    /*
+     Commit any list that opened, before deciding what worked.
+
+     A combobox takes the text *and* opens a list, and leaves the choice
+     uncommitted until something picks it. "Bachelor's Degree" sat in the Degree
+     box on a real Stripe application with "Bachelor's Degree" highlighted
+     underneath it and nothing selected.
+
+     This used to run only for fields that had *rejected* `set_value` and been
+     retyped, which is exactly the set a combobox is not in: it accepts the
+     write, so it never reached the fallback and never got its list committed.
+    */
+    let everythingWritten = written.map {
+      (id: $0.key, label: $0.value.label, key: $0.value.key, value: $0.value.value)
+    }
+    await commitSuggestions(on: after, for: everythingWritten, task: task)
+
+    // Read again: committing a choice replaces the fragment in the box with the
+    // option's own text, and judging the write against the fragment would call
+    // a correctly chosen field stubborn.
+    try? await Task.sleep(for: .milliseconds(400))
+    let committed = (try? await reread(app: app)) ?? after
+
     var outcomes: [FieldOutcome] = []
     var stubborn: [(id: String, label: String, key: String, value: String)] = []
 
     for (id, write) in written {
-      if after.control(id: id)?.value == write.value {
+      let now = committed.control(id: id)?.value
+      // A committed option often says more than was typed — "United Kingdom"
+      // for "United", "Bachelor's Degree (BA)" for "Bachelor's Degree" — so a
+      // prefix counts as landed.
+      let landed =
+        now == write.value
+        || (now?.lowercased().hasPrefix(write.value.lowercased()) ?? false)
+      if landed {
         outcomes.append(.init(label: write.label, state: .filled(from: write.key)))
       } else {
         stubborn.append((id, write.label, write.key, write.value))
@@ -285,7 +365,6 @@ struct FormFill: Sendable {
             : .skipped("the page would not keep this value")))
     }
 
-    if let settled { await commitSuggestions(on: settled, for: retyped, task: task) }
     return outcomes
   }
 
@@ -653,6 +732,36 @@ let knownFactKeys = [
   "dateOfBirth", "rightToWork", "sponsorship", "gender", "ethnicity",
   "cvPath", "coverLetterPath", "pronouns", "whyThisCompany",
 ]
+
+/// Whether a value is the right *shape* for the fact it claims to answer.
+///
+/// Deliberately loose. It exists to catch a value that arrived through a wrong
+/// mapping — "No" in a phone field — rather than to validate anyone's data, and
+/// a check that rejected unusual but real answers would be worse than none.
+func valueSuits(key: String, value: String) -> Bool {
+  let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !trimmed.isEmpty else { return false }
+
+  // A yes or a no answers a question, never a field that wants a value.
+  let yesNo = ["yes", "no", "n/a", "none"]
+  let looksLikeAnAnswer = yesNo.contains(trimmed.lowercased())
+
+  switch key {
+  case "phone":
+    return trimmed.filter(\.isNumber).count >= 7
+  case "email":
+    return trimmed.contains("@") && trimmed.contains(".")
+  case "linkedin", "github", "portfolio":
+    return trimmed.contains(".") && !trimmed.contains(" ")
+  case "graduationYear", "educationStart", "educationEnd":
+    return trimmed.contains { $0.isNumber }
+  case "firstName", "lastName", "fullName", "preferredName", "location", "country",
+    "citizenship", "university", "degree", "discipline":
+    return !looksLikeAnAnswer
+  default:
+    return true
+  }
+}
 
 /// Whether a field's own label asks for a credential.
 ///
