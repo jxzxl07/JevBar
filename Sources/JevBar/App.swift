@@ -36,6 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     popover.contentViewController = NSHostingController(rootView: BarView(model: model))
     self.popover = popover
 
+    // Hold-to-talk works whether or not the panel is open: the whole point is
+    // that you do not have to go and find JevBar first.
+    model.startVoice()
+
     /*
      A line in the log saying the bar actually appeared.
 
@@ -94,8 +98,16 @@ final class BarModel: ObservableObject {
   @Published var status = ""
   @Published var busy = false
   @Published var steps: [String] = []
+  @Published var listening = false
+  /// Fields the last run could not answer: fact key to the label that asked.
+  @Published var questions: [(key: String, label: String)] = []
+  @Published var answer = ""
+
+  let voice = Voice()
+  private let hotkey = Hotkey()
 
   private let log = RunLog()
+  private let profile = Profile()
   private lazy var engine = Engine(executable: enginePath())
   private var agent: Agent?
 
@@ -109,6 +121,57 @@ final class BarModel: ObservableObject {
       return "No model key. Put GEMINI_API_KEY in ~/Library/Application Support/JevBar/.env"
     }
     return nil
+  }
+
+  /// Hold-to-talk, from anywhere on the desktop.
+  func startVoice() {
+    hotkey.onPress = { [weak self] in
+      guard let self, !self.busy else { return }
+      self.listening = true
+      self.status = "Listening…"
+      self.command = ""
+      self.voice.startListening()
+    }
+    hotkey.onRelease = { [weak self] in
+      guard let self, self.listening else { return }
+      self.listening = false
+      self.voice.stopListening()
+      // Running happens on the *final* transcript, which arrives after the key
+      // is released. Running on the last partial would act on a sentence the
+      // recogniser had not finished correcting.
+    }
+    voice.onPartial = { [weak self] text in
+      self?.command = text
+    }
+    voice.onFinal = { [weak self] text in
+      guard let self, !text.isEmpty else { return }
+      self.command = text
+      self.run()
+    }
+    hotkey.start()
+
+    Task {
+      let state = await voice.prepare()
+      if case .unavailable(let why) = state { self.status = why }
+    }
+  }
+
+  /// Answer one of the questions the last run left open.
+  func submitAnswer(for key: String) {
+    let value = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else { return }
+    answer = ""
+
+    Task {
+      let stored = await agent?.answer(key: key, value: value) ?? false
+      self.questions.removeAll { $0.key == key }
+      self.status =
+        stored
+        ? (self.questions.isEmpty
+          ? "Saved. Run it again and it will fill that in."
+          : "Saved. \(self.questions.count) left.")
+        : "JevBar does not store that kind of answer."
+    }
   }
 
   func run() {
@@ -125,12 +188,15 @@ final class BarModel: ObservableObject {
     let runId = "run_\(UInt32.random(in: 0..<UInt32.max))"
 
     Task {
-      let agent = self.agent ?? Agent(engine: engine, think: Think(config: config), log: log)
+      let agent = self.agent ?? Agent(engine: engine, think: Think(config: config), log: log, profile: profile)
       self.agent = agent
       let result = await agent.run(command: text, runId: runId)
       self.busy = false
       self.steps = result.steps
       self.status = result.message
+      // Asked in the order the form asks them, so answering follows the page.
+      self.questions = await agent.pendingQuestions.map { (key: $0.key, label: $0.value) }
+        .sorted { $0.label < $1.label }
       if result.outcome == .done { self.command = "" }
     }
   }
@@ -158,12 +224,19 @@ struct BarView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      TextField("Tell JevBar what to do…", text: $model.command)
-        .textFieldStyle(.plain)
-        .font(.system(size: 16))
-        .focused($focused)
-        .onSubmit { model.run() }
-        .disabled(model.busy)
+      HStack(spacing: 8) {
+        if model.listening {
+          Image(systemName: "waveform")
+            .foregroundStyle(.red)
+            .symbolEffect(.variableColor)
+        }
+        TextField("Tell JevBar what to do…", text: $model.command)
+          .textFieldStyle(.plain)
+          .font(.system(size: 16))
+          .focused($focused)
+          .onSubmit { model.run() }
+          .disabled(model.busy)
+      }
 
       if let readiness = model.readiness {
         Text(readiness)
@@ -186,9 +259,23 @@ struct BarView: View {
         }
       }
 
+      if let question = model.questions.first {
+        Divider()
+        Text("What should I put for “\(question.label)”?")
+          .font(.callout)
+        TextField("Your answer — I will remember it", text: $model.answer)
+          .textFieldStyle(.roundedBorder)
+          .onSubmit { model.submitAnswer(for: question.key) }
+        if model.questions.count > 1 {
+          Text("\(model.questions.count - 1) more after this")
+            .font(.caption2).foregroundStyle(.tertiary)
+        }
+      }
+
       Divider()
       HStack {
-        Text("return to run").font(.caption2).foregroundStyle(.tertiary)
+        Text(model.listening ? "listening — let go to run" : "⌘⇧Space to talk · return to run")
+          .font(.caption2).foregroundStyle(.tertiary)
         Spacer()
         Button("Quit") { NSApp.terminate(nil) }
           .buttonStyle(.plain)

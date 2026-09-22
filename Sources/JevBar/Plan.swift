@@ -142,6 +142,17 @@ func splitClauses(_ command: String) -> [String] {
   return clauses
 }
 
+/// Whether the clause asks for a form to be filled in.
+///
+/// Separate from `looksLikeApplication`, which decides what is *refused*. This
+/// one decides which path runs, and a plain "fill this in" on an ordinary web
+/// form should take the fast path too.
+func asksToFill(_ clause: String) -> Bool {
+  let words = Set(clause.lowercased().split { !$0.isLetter }.map(String.init))
+  let verbs: Set<String> = ["fill", "complete", "populate", "autofill"]
+  return !words.isDisjoint(with: verbs)
+}
+
 /// Whether the clause asks for something to be closed rather than opened.
 ///
 /// Quitting is not destructive — an application asked to quit runs its own

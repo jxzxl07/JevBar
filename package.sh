@@ -45,6 +45,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>JevBar listens only while you hold its shortcut.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>JevBar turns what you say into a command, on this Mac.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>JevBar opens and closes the applications you name.</string>
 </dict></plist>
 PLIST
 
@@ -66,12 +68,25 @@ sign_all() {
   if [ -f "$APP/Contents/Resources/munim-computer-use" ]; then
     codesign --force --sign "$id" "$APP/Contents/Resources/munim-computer-use"
   fi
-  # Signing the engine writes extended attributes back onto the bundle, and
-  # codesign refuses one that carries them ("resource fork, Finder information,
-  # or similar detritus"). Clearing before the outer signature rather than only
-  # before the inner one is the difference between a build and a puzzle.
-  xattr -cr "$APP" 2>/dev/null || true
-  codesign --force --deep --sign "$id" "$APP"
+  # Clearing extended attributes and then signing is a race, not a sequence.
+  #
+  # This checkout is in a FileProvider-synced directory, so macOS re-attaches
+  # com.apple.FinderInfo asynchronously — often between the clear and the sign,
+  # which fails with "resource fork, Finder information, or similar detritus".
+  # It lost about one build in three. Retrying on exactly that error is the
+  # remedy; retrying on anything else would hide a real signing failure.
+  local attempt
+  for attempt in 1 2 3; do
+    xattr -cr "$APP" 2>/dev/null || true
+    if codesign --force --deep --sign "$id" "$APP" 2>/tmp/jevbar-codesign.err; then
+      return 0
+    fi
+    grep -q "detritus" /tmp/jevbar-codesign.err || { cat /tmp/jevbar-codesign.err >&2; return 1; }
+    sleep 1
+  done
+  echo "  ! codesign kept failing on extended attributes" >&2
+  cat /tmp/jevbar-codesign.err >&2
+  return 1
 }
 
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then

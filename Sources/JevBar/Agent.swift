@@ -42,17 +42,22 @@ actor Agent {
   private let engine: Engine
   private let think: Think
   private let log: RunLog
+  private let profile: Profile
 
   /// Consecutive turns with no observable change before the run stops.
   private let maxQuietTurns = 3
   /// Turns per step, whatever happens.
   private let maxTurns = 12
 
-  init(engine: Engine, think: Think, log: RunLog) {
+  init(engine: Engine, think: Think, log: RunLog, profile: Profile) {
     self.engine = engine
     self.think = think
     self.log = log
+    self.profile = profile
   }
+
+  /// Questions the last run could not answer, for the bar to put to the user.
+  private(set) var pendingQuestions: [String: String] = [:]
 
   /// Run a whole sentence: every clause, in order, stopping on the first failure.
   ///
@@ -149,6 +154,53 @@ actor Agent {
       }
     }
 
+    /*
+     A form is filled by lookup, not by the loop.
+
+     The loop is for work whose shape is not known in advance. A form is a list
+     of labelled boxes, and matching a box to a fact is a table lookup — sending
+     sixty of them through a model one at a time is how JevDesk spent
+     thirty-one seconds before the first character appeared, and still filled
+     five of sixty-one.
+    */
+    if step.kind == .jobApplication || asksToFill(step.goal) {
+      let screen: Screen
+      do {
+        screen = try await observe(app: step.app)
+      } catch {
+        return await fail("\(error)", runId: runId, step: number, performed: performed)
+      }
+
+      let filler = FormFill(engine: engine, profile: profile, think: think)
+      let result = await filler.fill(screen: screen, task: step.kind)
+
+      guard !result.outcomes.isEmpty else {
+        return await fail(
+          "I could not find any fields I can fill in \(screen.app).",
+          runId: runId, step: number, performed: performed)
+      }
+
+      for outcome in result.outcomes {
+        await log.step(runId: runId, step: number, detail: describe(outcome))
+      }
+      performed.append(contentsOf: result.filled.map { "filled \($0.label)" })
+
+      pendingQuestions = Dictionary(
+        result.questions.compactMap { outcome -> (String, String)? in
+          guard case .asks(let key) = outcome.state else { return nil }
+          return (key, outcome.label)
+        }, uniquingKeysWith: { first, _ in first })
+
+      let asked = pendingQuestions.count
+      let message =
+        "Filled \(result.filled.count) field\(result.filled.count == 1 ? "" : "s"). "
+        + (asked == 0
+          ? "Review it on the page — I will not submit an application for you."
+          : "I need \(asked) answer\(asked == 1 ? "" : "s") before I can finish.")
+
+      return RunResult(outcome: .readyForReview, message: message, steps: performed)
+    }
+
     for _ in 0..<maxTurns {
       let screen: Screen
       do {
@@ -203,6 +255,24 @@ actor Agent {
 
     return await fail(
       "I ran out of turns on: \(step.goal)", runId: runId, step: number, performed: performed)
+  }
+
+  /// Remember an answer the user gave, so the same field never asks again.
+  func answer(key: String, value: String) async -> Bool {
+    let stored = await profile.learn(key: key, value: value)
+    if stored { pendingQuestions.removeValue(forKey: key) }
+    return stored
+  }
+
+  private func describe(_ outcome: FieldOutcome) -> String {
+    // Labels and keys, never values: a log carrying what was typed into an
+    // application form carries someone's address in plain text, forever.
+    switch outcome.state {
+    case .filled(let key): return "filled \(outcome.label) from \(key)"
+    case .asks(let key): return "asks \(outcome.label) (\(key))"
+    case .skipped(let why): return "skipped \(outcome.label): \(why)"
+    case .refused(let why): return "refused \(outcome.label): \(why)"
+    }
   }
 
   /// Every failure says why, in the log as well as on screen.
