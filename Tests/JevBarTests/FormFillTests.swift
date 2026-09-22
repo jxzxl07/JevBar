@@ -336,3 +336,31 @@ struct ListCommitTests {
     #expect(FormFill.writableRoles.contains("TextField"))
   }
 }
+
+@Suite("Finding a field again after the page has changed")
+struct RelocationTests {
+  @Test("a required marker is not part of the label")
+  func stripsMarkers() {
+    // Real labels carry one: `Full name ✱`. Querying the page with that marker
+    // matches nothing, and an exact comparison then rejects the row even when
+    // the query does find it. Every field on a Stripe application came back as
+    // "the field moved before I could write it" because of this.
+    #expect(normalisedLabel("Full name ✱") == "full name")
+    #expect(normalisedLabel("Location (City) *") == "location city")
+    #expect(normalisedLabel("  Email   ") == "email")
+  }
+
+  @Test("two spellings of the same label match each other")
+  func matchesLoosely() {
+    #expect(normalisedLabel("First Name *") == normalisedLabel("first name"))
+  }
+
+  @Test("a long question is searched for by its opening words")
+  func shortensLongLabels() {
+    // A page prints a long question with wrapping that no exact query
+    // survives; its opening words are stable.
+    let question =
+      "We are always aiming to keep our school list inclusive of all institutions."
+    #expect(searchableWords(of: question) == "we are always aiming")
+  }
+}

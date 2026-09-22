@@ -284,13 +284,31 @@ struct FormFill: Sendable {
           continue
         }
 
-        // Focused first, so the Return below — when there is one — reaches this
-        // field rather than wherever focus happened to be.
+        /*
+         Clicked first, which is also what brings it into view.
+
+         `set_value` refuses an element that is not visible — every field on a
+         real form came back as "e130 is not visible in its window". `click`
+         does not: it uses the accessibility press action, which works on an
+         element that is scrolled out of view, and focusing a field is what
+         makes a browser scroll to it. So the click is not only about focus; it
+         is the only thing that makes the write possible at all.
+        */
         _ = try? await engine.call("click", ["element_id": live.id])
+        // The scroll that follows a focus takes a moment, and writing during it
+        // is writing to something still moving.
+        try? await Task.sleep(for: .milliseconds(250))
 
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
-        _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
+        do {
+          _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
+        } catch {
+          // A field that refuses a written value takes a typed one: typing
+          // produces the events a controlled component listens for, and the
+          // field already has focus from the click above.
+          _ = try await engine.call("type_text", ["element_id": live.id, "text": value])
+        }
 
         // A list is committed by clicking the row it offers. Nothing is ever
         // typed into a form to make it commit — see `commitByClicking`.
@@ -561,10 +579,30 @@ struct FormFill: Sendable {
   /// thirty seconds, and doing it once per field left runs that never came
   /// back at all.
   private func currentField(labelled label: String, app: String) async throws -> Control? {
+    /*
+     Asked for by a few plain words, and matched loosely.
+
+     Every field on a real Stripe application came back as "the field moved
+     before I could write it" — not because anything moved, but because this
+     searched for the label exactly as observed and compared it with `==`. Real
+     labels carry a required marker and their own spacing: `Full name ✱`. A
+     query containing that marker matches nothing, and an exact comparison then
+     rejects the row even when the query happens to find it.
+
+     So: search for the first few letters-only words, which is what the page
+     actually prints, and compare on a normalised form.
+    */
+    let query = searchableWords(of: label)
+    guard !query.isEmpty else { return nil }
+
     let outline = try await engine.call(
-      "get_app_state", ["app": app, "query": label, "max_elements": 60])
+      "get_app_state", ["app": app, "query": query, "max_elements": 80])
     let found = parseScreen(app: app, outline: outline)
-    return found.controls.first { $0.name == label && !isPageChrome($0) }
+
+    let wanted = normalisedLabel(label)
+    return found.controls.first { control in
+      normalisedLabel(control.name) == wanted && !isPageChrome(control)
+    }
   }
 
   private func reread(app: String) async throws -> Screen {
@@ -883,6 +921,24 @@ func valueSuits(key: String, value: String) -> Bool {
   default:
     return true
   }
+}
+
+/// A label reduced to what a page search can match: letters, digits, spaces.
+///
+/// Markers like `✱`, colons and stray spacing are what a form prints around a
+/// label, not part of it, and a query containing one matches nothing.
+func normalisedLabel(_ label: String) -> String {
+  let plain = String(label.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " })
+  return plain.split(separator: " ").map(String.init).joined(separator: " ")
+}
+
+/// The first few words of a label, for asking the page about it.
+///
+/// A few rather than all: a long question ("We are always aiming to keep our
+/// school list inclusive…") is printed with line breaks and wrapping that no
+/// exact query survives, while its opening words are stable.
+func searchableWords(of label: String, count: Int = 4) -> String {
+  normalisedLabel(label).split(separator: " ").prefix(count).joined(separator: " ")
 }
 
 /// Whether a control belongs to the page rather than to the form on it.
