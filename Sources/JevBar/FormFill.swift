@@ -164,7 +164,18 @@ struct FormFill: Sendable {
       }
     }
 
+    var writesThisPass = 0
     for field in fields {
+      /*
+       A few fields per pass, then a fresh look at the page.
+
+       Every write can re-render the form — validation appears, a list opens —
+       and that invalidates every id after it. Writing the whole form from one
+       observation put values in the wrong boxes; writing a handful and looking
+       again keeps them fresh without a lookup per field.
+      */
+      if writesThisPass >= Self.writesPerPass { break }
+
       // A drafted answer belongs to this field alone, so it is written straight
       // through rather than stored: "why this company" has a different answer
       // for every company, and keeping the first one would put Stripe's answer
@@ -264,27 +275,20 @@ struct FormFill: Sendable {
          again.
         */
         /*
-         The field is found again, by label, immediately before it is written.
+         Written with the id from this pass's own observation.
 
-         Ids belong to one snapshot. The list of fields here was observed once,
-         before anything was written, and every write re-renders the form —
-         validation appears, a list opens, a row is chosen — which invalidates
-         every id after it. Writing to a stale id writes into whatever now holds
-         it, and the values land in the wrong boxes and append:
+         Relocating each field by label was tried and cannot work: a filtered
+         `get_app_state` only describes what is *visible*, so a query for a
+         field below the fold returns nothing at all — every lookup logged
+         "asked 'when is your expected', got: nothing". The ids from a full read
+         are the only handle on an off-screen field.
 
-             First Name:  United KingdomJazil
-             Last Name:   Southend-on-SeaImran
-             Email:       jazil.imran@gmail.comjazil.imran@gmail.com
-
-         That is a fresh observation per field, which is expensive and is the
-         only thing that is correct. A label survives a re-render; an id does
-         not.
+         They go stale as soon as the page re-renders, so the answer is not to
+         re-find each field but to re-read the page often: a pass writes a
+         handful of fields and then `fillWholeForm` observes again. Short
+         batches are what keeps the ids fresh.
         */
-        guard let live = try await currentField(labelled: field.name, app: screen.app) else {
-          outcomes.append(
-            .init(label: field.name, state: .skipped("the field moved before I could write it")))
-          continue
-        }
+        let live = field
 
         /*
          Clicked first, which is also what brings it into view.
@@ -334,6 +338,7 @@ struct FormFill: Sendable {
         }
 
         written.append((id: live.id, label: field.name, key: key, value: value))
+        writesThisPass += 1
       } catch {
         outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
       }
@@ -447,6 +452,13 @@ struct FormFill: Sendable {
     return outcomes
   }
 
+  /// How many fields one pass writes before the page is read again.
+  ///
+  /// Small, because every write can re-render the form and invalidate the ids
+  /// that came with it. Four is a screenful of an application form, which is
+  /// also about as much as stays valid.
+  static let writesPerPass = 4
+
   /// Roles that open a list when written into, and only these get a Return.
   static let listRoles: Set<String> = ["ComboBox", "PopUpButton", "MenuButton"]
 
@@ -478,8 +490,9 @@ struct FormFill: Sendable {
     // and concludes there was nothing to commit.
     try? await Task.sleep(for: .milliseconds(500))
 
-    // The rows of an open list, not the whole page: the same reason
-    // `currentField` asks by query. A full read here costs as much as the fill.
+    // The rows of an open list, not the whole page. A filtered read only
+    // describes what is visible, which is exactly right here: an open list is
+    // on screen, and a full read would cost as much as the fill itself.
     guard
       let outline = try? await engine.call(
         "get_app_state", ["app": app, "query": value, "max_elements": 60])
@@ -602,73 +615,6 @@ struct FormFill: Sendable {
     _ = try? await engine.call("press_key", ["key": "escape"])
   }
 
-  /// This field as it is *now*, found by the label that does not change.
-  ///
-  /// Asked for by label rather than read whole. `get_app_state` takes a `query`
-  /// that filters to elements whose label contains the text, and on a page with
-  /// four hundred and fifty controls that is the difference between a fill that
-  /// finishes and one that does not: a full read of this form takes about
-  /// thirty seconds, and doing it once per field left runs that never came
-  /// back at all.
-  private func currentField(labelled label: String, app: String) async throws -> Control? {
-    /*
-     Asked for by a few plain words, and matched loosely.
-
-     Every field on a real Stripe application came back as "the field moved
-     before I could write it" — not because anything moved, but because this
-     searched for the label exactly as observed and compared it with `==`. Real
-     labels carry a required marker and their own spacing: `Full name ✱`. A
-     query containing that marker matches nothing, and an exact comparison then
-     rejects the row even when the query happens to find it.
-
-     So: search for the first few letters-only words, which is what the page
-     actually prints, and compare on a normalised form.
-    */
-    let query = searchableWords(of: label)
-    guard !query.isEmpty else { return nil }
-
-    let outline = try await engine.call(
-      "get_app_state", ["app": app, "query": query, "max_elements": 80])
-    let found = parseScreen(app: app, outline: outline)
-
-    let wanted = normalisedLabel(label)
-    let writable = found.controls.filter {
-      !isPageChrome($0) && (Self.writableRoles.contains($0.role) || Self.listRoles.contains($0.role))
-    }
-
-    if let exact = writable.first(where: { normalisedLabel($0.name) == wanted }) { return exact }
-
-    /*
-     Then a looser match, because a page does not always print a label twice
-     the same way.
-
-     A full read calls it "Location (City)" and a filtered read can call the
-     same control "Location (City) *" or wrap it — and an equality test then
-     says the field has gone. Containment either way round catches that without
-     matching a different field, because the query has already narrowed the
-     page to this label's own words.
-    */
-    if let loose = writable.first(where: { control in
-      let name = normalisedLabel(control.name)
-      return name.contains(wanted) || wanted.contains(name)
-    }) {
-      return loose
-    }
-
-    /*
-     And if there is still nothing, say what the page did offer.
-
-     "The field moved before I could write it" was true of a page that had
-     changed and of a lookup that was simply wrong, and those need opposite
-     fixes. Recording the names that came back turns the next run into an
-     answer instead of another guess — which is how the missing `AX` prefix and
-     the required marker were both found in one run each.
-    */
-    await log?.lookupFailed(
-      label: label, query: query, offered: Array(found.controls.map(\.name).prefix(12)))
-    return nil
-  }
-
   private func reread(app: String) async throws -> Screen {
     let outline = try await engine.call(
       "get_app_state", ["app": app, "max_elements": 2_000])
@@ -786,7 +732,7 @@ extension FormFill {
   func fillWholeForm(
     observe: () async throws -> Screen,
     task: TaskKind,
-    maxPasses: Int = 8,
+    maxPasses: Int = 16,
     budget: Duration = .seconds(180)
   ) async -> FillResult {
     var outcomes: [FieldOutcome] = []
