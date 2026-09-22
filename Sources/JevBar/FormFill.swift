@@ -52,7 +52,16 @@ struct FormFill: Sendable {
     "DateField", "TimeField", "IncrementorField",
   ]
 
-  func fill(screen: Screen, task: TaskKind) async -> FillResult {
+  /// Roles that hold a value but cannot be typed into.
+  ///
+  /// `School`, `Degree` and `Pronouns` on a real application came back as "the
+  /// page would not keep this value", because a text write cannot set a
+  /// dropdown at all. They are opened and the matching option is pressed —
+  /// which is what a person does, and what `commitSuggestions` already does for
+  /// an autocomplete.
+  static let chooserRoles: Set<String> = ["PopUpButton", "MenuButton", "Menu"]
+
+  func fillVisible(screen: Screen, task: TaskKind) async -> FillResult {
     let fields = screen.controls.filter {
       Self.writableRoles.contains($0.role) && !$0.name.isEmpty
         // A secure field is listed so it can be *recognised* and refused, never
@@ -175,6 +184,11 @@ struct FormFill: Sendable {
         Action(verb: .setValue, controlName: field.name, value: value), in: task)
       if case .refuse(let why) = decision {
         outcomes.append(.init(label: field.name, state: .refused(why)))
+        continue
+      }
+
+      if Self.chooserRoles.contains(field.role) {
+        outcomes.append(await choose(value, in: field, task: task, key: key, app: screen.app))
         continue
       }
 
@@ -321,6 +335,86 @@ struct FormFill: Sendable {
     "MenuItem", "Row", "Cell", "ListItem", "StaticText", "Link", "Button",
   ]
 
+  /// Open a dropdown and press the option that matches.
+  ///
+  /// The match is on text, not position: pressing the first item commits
+  /// whatever the menu happens to list first, which on a school picker is an
+  /// arbitrary university. Exact first, then a prefix — "University of
+  /// Cambridge" against a list offering "University of Cambridge (Cambridge,
+  /// UK)".
+  ///
+  /// If nothing matches, the menu is dismissed rather than left hanging over
+  /// the page: an open menu swallows the next click, so leaving one behind
+  /// breaks every field after it.
+  private func choose(
+    _ value: String, in field: Control, task: TaskKind, key: String, app: String
+  ) async -> FieldOutcome {
+    guard case .allow = authorize(
+      Action(verb: .click, controlName: field.name, value: nil), in: task)
+    else {
+      return .init(label: field.name, state: .refused("opening this control is not allowed"))
+    }
+
+    do {
+      _ = try await engine.call("click", ["element_id": field.id])
+    } catch {
+      return .init(label: field.name, state: .skipped("could not open the list: \(error)"))
+    }
+
+    // A menu renders on the next frame, and reading before it does sees the
+    // page underneath with no options on it.
+    try? await Task.sleep(for: .milliseconds(450))
+
+    guard let opened = try? await reread(app: app) else {
+      await dismissMenu()
+      return .init(label: field.name, state: .skipped("could not read the list"))
+    }
+
+    let wanted = value.lowercased()
+    let candidates = opened.controls.filter { $0.id != field.id }
+    let exact: Control? = candidates.first { $0.name.lowercased() == wanted }
+    let prefixed: Control? = candidates.first { candidate in
+      guard Self.optionRoles.contains(candidate.role) else { return false }
+      return candidate.name.lowercased().hasPrefix(wanted)
+    }
+    let option: Control? = exact ?? prefixed
+
+    guard let option else {
+      await dismissMenu()
+      return .init(
+        label: field.name,
+        state: .skipped("the list does not offer \u{201C}\(value)\u{201D}"))
+    }
+
+    guard case .allow = authorize(
+      Action(verb: .click, controlName: option.name, value: nil), in: task)
+    else {
+      await dismissMenu()
+      return .init(label: field.name, state: .refused("that option is not allowed"))
+    }
+
+    do {
+      _ = try await engine.call("click", ["element_id": option.id])
+      return .init(label: field.name, state: .filled(from: key))
+    } catch {
+      await dismissMenu()
+      return .init(label: field.name, state: .skipped("could not choose it: \(error)"))
+    }
+  }
+
+  /// Roles a dropdown uses for the things inside it.
+  private static let optionRoles: Set<String> = [
+    "MenuItem", "Row", "Cell", "ListItem", "StaticText", "Button",
+  ]
+
+  /// Close a menu that was opened and not used.
+  ///
+  /// An open menu swallows the next click, so a dropdown left hanging breaks
+  /// every field after it rather than just its own.
+  private func dismissMenu() async {
+    _ = try? await engine.call("press_key", ["key": "escape"])
+  }
+
   private func reread(app: String) async throws -> Screen {
     let outline = try await engine.call(
       "get_app_state", ["app": app, "max_elements": 2_000])
@@ -412,6 +506,66 @@ extension FormFill {
       grounded[id] = text
     }
     return grounded
+  }
+}
+
+extension FormFill {
+  /// Fill the whole form, not just the part that happens to be on screen.
+  ///
+  /// ## Why this loops
+  ///
+  /// The engine refuses an element it cannot see — `e71 is not visible in its
+  /// window — scroll it into view` — which is right for a click and fatal for a
+  /// form. A real Stripe application skipped five required fields for that
+  /// reason alone, and the ones below the fold were never even offered.
+  ///
+  /// So: fill what is reachable, scroll a screenful, look again, and stop when
+  /// a pass finds nothing new. Scrolling *between* passes rather than per field
+  /// is what keeps this to a handful of round trips instead of one per box.
+  ///
+  /// ## How it knows it is finished
+  ///
+  /// By label, not by element id: ids belong to one snapshot and every scroll
+  /// invalidates them, so counting ids would make the same field look new on
+  /// every pass and loop forever. A pass that reports no label it has not seen
+  /// before is the end of the form.
+  func fillWholeForm(
+    observe: () async throws -> Screen,
+    task: TaskKind,
+    maxPasses: Int = 8
+  ) async -> FillResult {
+    var outcomes: [FieldOutcome] = []
+    var seen: Set<String> = []
+
+    for pass in 0..<maxPasses {
+      guard let screen = try? await observe() else { break }
+
+      let fresh = screen.controls.filter { control in
+        (Self.writableRoles.contains(control.role) || Self.chooserRoles.contains(control.role))
+          && !control.name.isEmpty && !seen.contains(control.name)
+      }
+
+      if fresh.isEmpty && pass > 0 { break }
+
+      let result = await fillVisible(screen: screen, task: task)
+      let novel = result.outcomes.filter { !seen.contains($0.label) }
+      outcomes.append(contentsOf: novel)
+      for outcome in novel { seen.insert(outcome.label) }
+
+      // Nothing new on this screenful and nowhere left to go.
+      if novel.isEmpty && pass > 0 { break }
+
+      do {
+        _ = try await engine.call("scroll", ["direction": "down", "amount": 8])
+      } catch {
+        break
+      }
+      // A page scrolls on the next frame; reading before it does sees the same
+      // fields again and ends the loop a screenful early.
+      try? await Task.sleep(for: .milliseconds(500))
+    }
+
+    return FillResult(outcomes: outcomes)
   }
 }
 

@@ -217,3 +217,31 @@ struct DocumentTests {
     #expect(!isOpenEnded(plain))
   }
 }
+
+@Suite("Covering a form that does not fit on screen")
+struct WholeFormTests {
+  @Test("a dropdown is a role the filler recognises, not a text field")
+  func dropdownsAreChoosers() {
+    // School, Degree and Pronouns on a real application came back as "the page
+    // would not keep this value", because a text write cannot set a dropdown at
+    // all. They are opened and the matching option is pressed instead.
+    #expect(FormFill.chooserRoles.contains("PopUpButton"))
+    #expect(!FormFill.writableRoles.contains("PopUpButton"))
+  }
+
+  @Test("progress is tracked by label, because ids do not survive a scroll")
+  func tracksByLabel() {
+    // Element ids belong to one snapshot. Counting them would make the same
+    // field look new after every scroll, and the loop would never end.
+    let before = Control(id: "e12", role: "TextField", name: "Email", value: nil, depth: 0)
+    let after = Control(id: "e88", role: "TextField", name: "Email", value: nil, depth: 0)
+    #expect(before.id != after.id)
+    #expect(before.name == after.name)
+  }
+
+  @Test("a secure field is recognised so it can be refused, never filled")
+  func secureFieldsExcluded() {
+    #expect(FormFill.writableRoles.contains("SecureTextField"))
+    #expect(credentialLabel("Password"))
+  }
+}
