@@ -210,11 +210,22 @@ actor Agent {
         }, uniquingKeysWith: { first, _ in first })
 
       let asked = pendingQuestions.count
-      let message =
+      let stuck = result.outcomes.filter {
+        if case .skipped(let why) = $0.state { return why.contains("would not keep") }
+        return false
+      }.count
+
+      // "Filled" means read back off the page. A count that included writes the
+      // page discarded is the number that made every other number untrustworthy.
+      var message =
         "Filled \(result.filled.count) field\(result.filled.count == 1 ? "" : "s"). "
         + (asked == 0
           ? "Review it on the page — I will not submit an application for you."
           : "I need \(asked) answer\(asked == 1 ? "" : "s") before I can finish.")
+      if stuck > 0 {
+        message += " \(stuck) would not take a value, so you will need to type "
+          + (stuck == 1 ? "that one" : "those") + " yourself."
+      }
 
       return RunResult(outcome: .readyForReview, message: message, steps: performed)
     }

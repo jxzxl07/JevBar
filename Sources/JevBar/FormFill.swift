@@ -77,6 +77,8 @@ struct FormFill: Sendable {
     }
 
     var outcomes: [FieldOutcome] = []
+    /// Written but not yet proved: nothing counts as filled until it reads back.
+    var written: [String: (label: String, key: String, value: String)] = [:]
     var known = await profile.all()
 
     /*
@@ -144,13 +146,102 @@ struct FormFill: Sendable {
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
         _ = try await engine.call("set_value", ["element_id": field.id, "value": value])
-        outcomes.append(.init(label: field.name, state: .filled(from: key)))
+        written[field.id] = (label: field.name, key: key, value: value)
       } catch {
         outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
       }
     }
 
+    outcomes.append(contentsOf: await verify(written, app: screen.app, task: task))
     return FillResult(outcomes: outcomes)
+  }
+
+  /// Check that what was written is actually on the page, and retype it if not.
+  ///
+  /// ## Why this is not optional
+  ///
+  /// `set_value` writes through the accessibility API, and a React-controlled
+  /// input discards a value that arrives without the events a keystroke would
+  /// have produced: the write succeeds, the component re-renders, and the box
+  /// is empty again. The engine reports the write it made, not the value the
+  /// page kept — so six fields were reported filled on a Lever application that
+  /// was visibly blank.
+  ///
+  /// Reporting a write nobody can see is worse than failing. It is the one
+  /// outcome that makes every other number untrustworthy, and it is why nothing
+  /// here counts as filled until it has been read back.
+  ///
+  /// One observation for the whole form rather than one per field: a form has
+  /// sixty of them, and sixty round trips is the thirty-one seconds this design
+  /// exists to avoid.
+  private func verify(
+    _ written: [String: (label: String, key: String, value: String)],
+    app: String,
+    task: TaskKind
+  ) async -> [FieldOutcome] {
+    guard !written.isEmpty else { return [] }
+
+    // A controlled component re-renders on the next frame, so reading straight
+    // away can see a value that is about to be thrown away.
+    try? await Task.sleep(for: .milliseconds(400))
+
+    guard let after = try? await reread(app: app) else {
+      // The page could not be read again. Saying "filled" here would be the
+      // same unverified claim, so these are reported as unknown instead.
+      return written.values.map {
+        .init(label: $0.label, state: .skipped("written, but I could not check it landed"))
+      }
+    }
+
+    var outcomes: [FieldOutcome] = []
+    var stubborn: [(id: String, label: String, key: String, value: String)] = []
+
+    for (id, write) in written {
+      if after.control(id: id)?.value == write.value {
+        outcomes.append(.init(label: write.label, state: .filled(from: write.key)))
+      } else {
+        stubborn.append((id, write.label, write.key, write.value))
+      }
+    }
+
+    guard !stubborn.isEmpty else { return outcomes }
+
+    var retyped: [(id: String, label: String, key: String, value: String)] = []
+    for field in stubborn {
+      // The engine's own advice for a field that rejects `set_value`: focus it
+      // and type, which produces the events a controlled component listens for.
+      do {
+        _ = try await engine.call("click", ["element_id": field.id])
+        _ = try await engine.call("type_text", ["element_id": field.id, "text": field.value])
+        retyped.append(field)
+      } catch {
+        outcomes.append(.init(label: field.label, state: .skipped("\(error)")))
+      }
+    }
+
+    // And check *that* too. Claiming the fallback worked without looking would
+    // be the same unverified claim one step further down, which is exactly how
+    // this bug survived being fixed once already.
+    try? await Task.sleep(for: .milliseconds(400))
+    let settled = try? await reread(app: app)
+
+    for field in retyped {
+      let landed = settled?.control(id: field.id)?.value == field.value
+      outcomes.append(
+        .init(
+          label: field.label,
+          state: landed
+            ? .filled(from: field.key)
+            : .skipped("the page would not keep this value")))
+    }
+
+    return outcomes
+  }
+
+  private func reread(app: String) async throws -> Screen {
+    let outline = try await engine.call(
+      "get_app_state", ["app": app, "max_elements": 2_000])
+    return parseScreen(app: app, outline: outline)
   }
 
   /// Ask the model which known fact answers each label it could not place.
