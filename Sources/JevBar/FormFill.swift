@@ -301,12 +301,27 @@ struct FormFill: Sendable {
 
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
-        do {
-          _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
-        } catch {
-          // A field that refuses a written value takes a typed one: typing
-          // produces the events a controlled component listens for, and the
-          // field already has focus from the click above.
+        /*
+         Every attempt at this field happens now, not on a later pass.
+
+         The first pass used to click each field, fail to write it, and leave
+         it — so the form was visibly *selected* four fields at a time with
+         nothing typed, and only a later pass filled them in. Watching it do
+         that is watching it fail and retry, which is not what it should look
+         like and not what it should do.
+
+         A field that refuses a written value gets a moment for its scroll to
+         finish, then a second attempt, then a typed one — typing produces the
+         events a controlled component listens for, and the field already has
+         focus from the click above.
+        */
+        var wrote = false
+        for attempt in 0..<2 where !wrote {
+          if attempt > 0 { try? await Task.sleep(for: .milliseconds(400)) }
+          wrote = (try? await engine.call(
+            "set_value", ["element_id": live.id, "value": value])) != nil
+        }
+        if !wrote {
           _ = try await engine.call("type_text", ["element_id": live.id, "text": value])
         }
 
@@ -469,13 +484,28 @@ struct FormFill: Sendable {
     else { return false }
     let open = parseScreen(app: app, outline: outline)
 
+    /*
+     The row that is showing, which is the one under the field.
+
+     A prefix match was tried first and is too strict: a list offers "United
+     Kingdom +44" for "United Kingdom" but also "Bachelor's Degree (BA)" for
+     "Bachelor's", and a school picker rewrites what it shows entirely. Since
+     the value was typed into the field a moment ago, the list is already
+     filtered to it — so the first row it offers is the answer, and taking it
+     is the same action as clicking the option just below the box.
+
+     Matching is still tried first, because when it does match it is certain;
+     the first row is the fallback rather than the rule.
+    */
     let wanted = value.lowercased()
+    let rows = open.controls.filter { control in
+      control.id != field.id && Self.suggestionRoles.contains(control.role)
+        && !control.name.isEmpty && !isPageChrome(control)
+    }
     guard
-      let row = open.controls.first(where: { control in
-        control.id != field.id
-          && Self.suggestionRoles.contains(control.role)
-          && control.name.lowercased().hasPrefix(wanted)
-      })
+      let row = rows.first(where: { $0.name.lowercased().hasPrefix(wanted) })
+        ?? rows.first(where: { wanted.hasPrefix($0.name.lowercased()) })
+        ?? rows.first
     else { return false }
 
     guard case .allow = authorize(

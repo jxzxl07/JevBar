@@ -105,6 +105,7 @@ final class BarModel: ObservableObject {
 
   let voice = Voice()
   private let hotkey = Hotkey()
+  private let overlay = Overlay()
 
   private let log = RunLog()
   private let profile = Profile()
@@ -130,11 +131,15 @@ final class BarModel: ObservableObject {
       self.listening = true
       self.status = "Listening…"
       self.command = ""
+      // Shown from the moment the key goes down, so there is never a silence
+      // where it is unclear whether JevBar is hearing anything.
+      self.overlay.show("")
       self.voice.startListening()
     }
     hotkey.onRelease = { [weak self] in
       guard let self, self.listening else { return }
       self.listening = false
+      self.overlay.hide()
       self.voice.stopListening()
       // Running happens on the *final* transcript, which arrives after the key
       // is released. Running on the last partial would act on a sentence the
@@ -142,9 +147,12 @@ final class BarModel: ObservableObject {
     }
     voice.onPartial = { [weak self] text in
       self?.command = text
+      self?.overlay.show(text)
     }
     voice.onFinal = { [weak self] text in
-      guard let self, !text.isEmpty else { return }
+      guard let self else { return }
+      self.overlay.hide()
+      guard !text.isEmpty else { return }
       self.command = text
       self.run()
     }
