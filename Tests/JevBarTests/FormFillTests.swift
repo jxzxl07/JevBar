@@ -69,6 +69,28 @@ struct ProfileTests {
 
 @Suite("Reading a real accessibility outline")
 struct OutlineTests {
+  @Test("the engine's spelling of a role and the platform's are the same role")
+  func rolesNormalise() {
+    // The engine emits `TextField`; the API calls it `AXTextField`. A set in
+    // one spelling matches nothing in the other, and a Lever form of sixty
+    // boxes reported "none is a text field I can fill".
+    #expect(normaliseRole("AXTextField") == "TextField")
+    #expect(normaliseRole("TextField") == "TextField")
+    #expect(FormFill.writableRoles.contains(normaliseRole("AXTextArea")))
+  }
+
+  @Test("the engine's own spelling is parsed as fillable")
+  func parsesEngineSpelling() {
+    let outline = """
+      Window "Application"
+        [e1] TextField "First Name"
+        [e2] Button "Submit application"
+      """
+    let screen = parseScreen(app: "Safari", outline: outline)
+    let writable = screen.controls.filter { FormFill.writableRoles.contains($0.role) }
+    #expect(writable.map(\.id) == ["e1"])
+  }
+
   @Test("a web form's fields are recognised by role")
   func recognisesWebFields() {
     // The roles a browser reports for a web form. If the parser or the role set
@@ -85,9 +107,7 @@ struct OutlineTests {
     let screen = parseScreen(app: "Safari", outline: outline)
     #expect(screen.controls.count == 5)
 
-    let writable = screen.controls.filter {
-      ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains($0.role)
-    }
+    let writable = screen.controls.filter { FormFill.writableRoles.contains($0.role) }
     #expect(writable.map(\.id) == ["e1", "e2", "e3"])
   }
 

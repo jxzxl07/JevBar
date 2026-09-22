@@ -25,7 +25,8 @@ struct ScreenTests {
   func readsNames() {
     let screen = parseScreen(app: "Google Chrome", outline: outline)
     #expect(screen.control(id: "e5")?.name == "Submit application")
-    #expect(screen.control(id: "e3")?.role == "AXTextField")
+    // Normalised: the engine and the platform spell this role two ways.
+    #expect(screen.control(id: "e3")?.role == "TextField")
   }
 
   @Test("it reads a field's current text, and tolerates its absence")

@@ -62,7 +62,7 @@ func parseScreen(app: String, outline: String) -> Screen {
     controls.append(
       Control(
         id: id,
-        role: firstWord(of: rest),
+        role: normaliseRole(firstWord(of: rest)),
         name: quoted(in: rest) ?? "",
         value: value(in: rest),
         depth: depth))
@@ -73,6 +73,17 @@ func parseScreen(app: String, outline: String) -> Screen {
 
 private func firstWord(of text: String) -> String {
   String(text.split(separator: " ").first ?? "")
+}
+
+/// A role, with or without the `AX` the platform sometimes puts in front.
+///
+/// The engine emits `TextField`; the accessibility API calls the same thing
+/// `AXTextField`. A set written in one spelling matches nothing written in the
+/// other, and the failure is silent in the worst way: a form of sixty boxes
+/// reports "none is a text field I can fill", which reads as the page being
+/// strange rather than as two names for one role.
+func normaliseRole(_ role: String) -> String {
+  role.hasPrefix("AX") ? String(role.dropFirst(2)) : role
 }
 
 /// The first double-quoted run, which is where the outline puts the name.

@@ -345,8 +345,16 @@ actor Agent {
     } else {
       target = try await frontmostApp()
     }
+    /*
+     A real application form is long.
+
+     Three hundred was this code's own cap, not the engine's, and a Lever page
+     spent all of it on the navigation and the job description before reaching
+     a single input. The engine truncates and says so; what it cannot do is
+     know that the interesting part comes last.
+    */
     let outline = try await engine.call(
-      "get_app_state", ["app": target, "max_elements": 300])
+      "get_app_state", ["app": target, "max_elements": 2_000])
     return parseScreen(app: target, outline: outline)
   }
 

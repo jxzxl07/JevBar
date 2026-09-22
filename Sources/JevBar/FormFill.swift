@@ -40,14 +40,25 @@ struct FormFill: Sendable {
   let profile: Profile
   let think: Think?
 
-  /// Text fields worth trying to fill. A button is not a field, and neither is
-  /// a label.
-  private static let writableRoles: Set<String> = [
-    "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField",
+  /// Roles worth trying to fill. A button is not a field, and neither is a label.
+  ///
+  /// Written without the `AX` prefix, and compared against a normalised role,
+  /// because the engine and the platform spell the same role two ways. The
+  /// first real attempt at a Lever form read three hundred controls and matched
+  /// none of them for exactly that reason.
+  static let writableRoles: Set<String> = [
+    "TextField", "TextArea", "ComboBox", "SearchField", "SecureTextField",
+    "DateField", "TimeField", "IncrementorField",
   ]
 
   func fill(screen: Screen, task: TaskKind) async -> FillResult {
-    let fields = screen.controls.filter { Self.writableRoles.contains($0.role) && !$0.name.isEmpty }
+    let fields = screen.controls.filter {
+      Self.writableRoles.contains($0.role) && !$0.name.isEmpty
+        // A secure field is listed so it can be *recognised* and refused, never
+        // so it can be filled. The engine refuses it too; this is the second of
+        // two independent guards rather than the only one.
+        && $0.role != "SecureTextField"
+    }
     guard !fields.isEmpty else { return FillResult(outcomes: []) }
 
     // One pass over the labels the table knows, then one request for the rest.
