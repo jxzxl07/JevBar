@@ -62,10 +62,22 @@ struct FormFill: Sendable {
   /// which is what a person does.
   static let chooserRoles: Set<String> = ["PopUpButton", "MenuButton", "Menu"]
 
-  func fillVisible(screen: Screen, task: TaskKind) async -> FillResult {
+  func fillVisible(
+    screen: Screen, task: TaskKind, alreadyDone: Set<String> = []
+  ) async -> FillResult {
     let fields = screen.controls.filter {
       Self.writableRoles.contains($0.role) && !$0.name.isEmpty
         && !isPageChrome($0)
+        /*
+         Fields this run has already finished with.
+
+         Without this the cap on writes per pass was a cap on *which* fields
+         were ever written: every pass started at the top of the list, wrote the
+         first four, and stopped — so First Name, Last Name, Email and Phone
+         were filled again and again while the rest of the form was never
+         reached at all.
+        */
+        && !alreadyDone.contains($0.name)
         // A secure field is listed so it can be *recognised* and refused, never
         // so it can be filled. The engine refuses it too; this is the second of
         // two independent guards rather than the only one.
@@ -725,7 +737,7 @@ extension FormFill {
 
       if fresh.isEmpty && pass > 0 { break }
 
-      let result = await fillVisible(screen: screen, task: task)
+      let result = await fillVisible(screen: screen, task: task, alreadyDone: seen)
       let novel = result.outcomes.filter { !seen.contains($0.label) }
       outcomes.append(contentsOf: novel)
 
