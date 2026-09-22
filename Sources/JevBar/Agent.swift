@@ -195,7 +195,10 @@ actor Agent {
          that were true and useless; the counts turn one sentence into a
          diagnosis.
         */
-        let roles = Set(screen.controls.map(\.role)).sorted().prefix(8).joined(separator: ", ")
+        // Every role, not the first eight alphabetically — that cut the list
+        // off after "MenuButton" and hid whether there were any text fields at
+        // all, which is the entire question being asked.
+        let roles = Set(screen.controls.map(\.role)).sorted().joined(separator: ", ")
         await log.step(
           runId: runId, step: number,
           detail: "no fillable fields: \(screen.controls.count) control(s), roles: \(roles)")

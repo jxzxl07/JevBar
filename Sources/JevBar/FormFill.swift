@@ -442,7 +442,14 @@ struct FormFill: Sendable {
     // A list renders on the next frame; looking before it does finds nothing
     // and concludes there was nothing to commit.
     try? await Task.sleep(for: .milliseconds(500))
-    guard let open = try? await reread(app: app) else { return false }
+
+    // The rows of an open list, not the whole page: the same reason
+    // `currentField` asks by query. A full read here costs as much as the fill.
+    guard
+      let outline = try? await engine.call(
+        "get_app_state", ["app": app, "query": value, "max_elements": 60])
+    else { return false }
+    let open = parseScreen(app: app, outline: outline)
 
     let wanted = value.lowercased()
     guard
@@ -546,9 +553,18 @@ struct FormFill: Sendable {
   }
 
   /// This field as it is *now*, found by the label that does not change.
+  ///
+  /// Asked for by label rather than read whole. `get_app_state` takes a `query`
+  /// that filters to elements whose label contains the text, and on a page with
+  /// four hundred and fifty controls that is the difference between a fill that
+  /// finishes and one that does not: a full read of this form takes about
+  /// thirty seconds, and doing it once per field left runs that never came
+  /// back at all.
   private func currentField(labelled label: String, app: String) async throws -> Control? {
-    let screen = try await reread(app: app)
-    return screen.controls.first { $0.name == label && !isPageChrome($0) }
+    let outline = try await engine.call(
+      "get_app_state", ["app": app, "query": label, "max_elements": 60])
+    let found = parseScreen(app: app, outline: outline)
+    return found.controls.first { $0.name == label && !isPageChrome($0) }
   }
 
   private func reread(app: String) async throws -> Screen {
@@ -668,12 +684,32 @@ extension FormFill {
   func fillWholeForm(
     observe: () async throws -> Screen,
     task: TaskKind,
-    maxPasses: Int = 8
+    maxPasses: Int = 8,
+    budget: Duration = .seconds(180)
   ) async -> FillResult {
     var outcomes: [FieldOutcome] = []
     var seen: Set<String> = []
 
+    /*
+     A fill that runs out of time says so, rather than appearing to hang.
+
+     A full read of a real Stripe application takes about thirty seconds, and
+     doing one per field produced runs that never came back — the bar sat on
+     "Working…" with no way to tell whether it was thinking or wedged. Reading
+     by query fixed the cost; this makes the failure honest if anything else
+     ever gets slow again.
+    */
+    let deadline = ContinuousClock.now + budget
+
     for pass in 0..<maxPasses {
+      if ContinuousClock.now >= deadline {
+        outcomes.append(
+          .init(
+            label: "the rest of the form",
+            state: .skipped("I ran out of time before reaching these")))
+        break
+      }
+
       guard let screen = try? await observe() else { break }
 
       let fresh = screen.controls.filter { control in
