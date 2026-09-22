@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// What happened, in words the user can act on.
@@ -99,12 +100,12 @@ actor Agent {
 
     if let app = step.app {
       do {
-        _ = try await engine.call("activate_app", ["app": app])
+        try await open(app: app)
         performed.append("opened \(app)")
-        await log.step(runId: runId, step: number, detail: "activate_app \(app)")
+        await log.step(runId: runId, step: number, detail: "opened \(app)")
       } catch {
-        return RunResult(
-          outcome: .failed, message: "I could not open \(app). \(error)", steps: performed)
+        return await fail(
+          "I could not open \(app). \(error)", runId: runId, step: number, performed: performed)
       }
     }
 
@@ -113,26 +114,23 @@ actor Agent {
       do {
         screen = try await observe(app: step.app)
       } catch {
-        return RunResult(outcome: .failed, message: "\(error)", steps: performed)
+        return await fail("\(error)", runId: runId, step: number, performed: performed)
       }
 
       let fingerprint = screen.controls.map(\.id).joined(separator: ",")
       quietTurns = fingerprint == lastFingerprint ? quietTurns + 1 : 0
       lastFingerprint = fingerprint
       if quietTurns >= maxQuietTurns {
-        return RunResult(
-          outcome: .failed,
-          message:
-            "I tried \(maxQuietTurns) times and nothing on screen changed, so I stopped rather "
-            + "than claim it was done.",
-          steps: performed)
+        return await fail(
+          "I tried \(maxQuietTurns) times and nothing on screen changed, so I stopped rather "
+            + "than claim it was done.", runId: runId, step: number, performed: performed)
       }
 
       let move: Move
       do {
         move = try await decide(goal: step.goal, screen: screen, doneSoFar: performed)
       } catch {
-        return RunResult(outcome: .failed, message: "\(error)", steps: performed)
+        return await fail("\(error)", runId: runId, step: number, performed: performed)
       }
 
       await log.step(
@@ -144,7 +142,7 @@ actor Agent {
       case "ready_for_review":
         return RunResult(outcome: .readyForReview, message: move.reason, steps: performed)
       case "blocked":
-        return RunResult(outcome: .failed, message: move.reason, steps: performed)
+        return await fail(move.reason, runId: runId, step: number, performed: performed)
       default:
         break
       }
@@ -163,10 +161,54 @@ actor Agent {
       }
     }
 
-    return RunResult(
-      outcome: .failed,
-      message: "I ran out of turns on: \(step.goal)",
-      steps: performed)
+    return await fail(
+      "I ran out of turns on: \(step.goal)", runId: runId, step: number, performed: performed)
+  }
+
+  /// Every failure says why, in the log as well as on screen.
+  ///
+  /// The first version of this returned a message to the user and wrote nothing
+  /// down, so "open Notes" failed instantly with a blank record — the exact
+  /// thing the log exists to prevent, reintroduced by returning early.
+  private func fail(
+    _ why: String, runId: String, step: Int, performed: [String]
+  ) async -> RunResult {
+    await log.step(runId: runId, step: step, detail: "failed: \(why)")
+    return RunResult(outcome: .failed, message: why, steps: performed)
+  }
+
+  /// Open an application, launching it when it is not already running.
+  ///
+  /// The engine's `activate_app` only brings an *already running* app to the
+  /// front — it is documented as foregrounding windows, not as launching. So
+  /// "open Safari" worked (it was running) and "open Notes" failed outright,
+  /// which read as the agent being broken rather than as a missing verb.
+  ///
+  /// `NSWorkspace` launches it; the engine then foregrounds it, because a newly
+  /// launched app is not reliably frontmost by the time the next observation
+  /// happens.
+  private func open(app: String) async throws {
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app)
+      ?? applicationURL(named: app)
+    {
+      let configuration = NSWorkspace.OpenConfiguration()
+      configuration.activates = true
+      _ = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+      // A launch returns as soon as macOS accepts it; the window arrives later,
+      // and observing before it does reads the application that was in front.
+      try? await Task.sleep(for: .milliseconds(900))
+      return
+    }
+    _ = try await engine.call("activate_app", ["app": app])
+  }
+
+  private func applicationURL(named name: String) -> URL? {
+    let directories = ["/Applications", "/System/Applications", "/System/Applications/Utilities"]
+    for directory in directories {
+      let candidate = URL(fileURLWithPath: directory).appendingPathComponent("\(name).app")
+      if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+    }
+    return nil
   }
 
   private func observe(app: String?) async throws -> Screen {

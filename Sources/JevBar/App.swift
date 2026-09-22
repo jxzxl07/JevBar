@@ -3,30 +3,88 @@ import SwiftUI
 
 /// JevBar: a menu-bar item, a command field, and the loop behind them.
 ///
-/// `MenuBarExtra` with `.window` rather than a normal app window: the whole
-/// point is that it is summoned over whatever you are doing and does not take
-/// the frontmost application away from you, because the frontmost application is
-/// the one it is about to act on.
-@main
-struct JevBarApp: App {
-  @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-  @StateObject private var model = BarModel()
+/// ## Why the status item is built by hand
+///
+/// SwiftUI's `MenuBarExtra` is the obvious way to write this and it does not
+/// work here: in an executable built by SwiftPM rather than Xcode it fails
+/// silently, leaving a running process with `StatusBarItemCount = NULL` and
+/// nothing on screen — an app that launches, stays up, and cannot be seen or
+/// quit. `NSStatusItem` with a popover is a few more lines and actually appears.
+///
+/// The app is an accessory: no Dock icon, no menu bar of its own. That is not
+/// only tidiness. JevBar reads whichever application is frontmost, so becoming
+/// frontmost itself would mean reading its own window.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+  private var statusItem: NSStatusItem?
+  private var popover: NSPopover?
+  private let model = BarModel()
 
-  var body: some Scene {
-    MenuBarExtra("JevBar", systemImage: "wand.and.rays") {
-      BarView(model: model)
-        .frame(width: 420)
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    NSApp.setActivationPolicy(.accessory)
+
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    item.button?.image = NSImage(
+      systemSymbolName: "wand.and.rays", accessibilityDescription: "JevBar")
+    item.button?.target = self
+    item.button?.action = #selector(toggle)
+    statusItem = item
+
+    let popover = NSPopover()
+    popover.contentSize = NSSize(width: 420, height: 260)
+    popover.behavior = .transient
+    popover.contentViewController = NSHostingController(rootView: BarView(model: model))
+    self.popover = popover
+
+    /*
+     A line in the log saying the bar actually appeared.
+
+     An accessory app with no window is invisible when it works and invisible
+     when it does not, and the first attempt at this failed exactly that way:
+     a running process, no status item, nothing to click and no way to quit it.
+     Recording whether the button exists turns "I don't think it's opening"
+     into a question with an answer.
+    */
+    let placement = item.button == nil ? "no status item button" : "status item ready"
+    let note = "\(Date()) launch: \(placement), engine=\(enginePath().path)\n"
+    if let data = note.data(using: .utf8) {
+      let file = supportDirectory().appendingPathComponent("launch.log")
+      if let handle = try? FileHandle(forWritingTo: file) {
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+      } else {
+        try? data.write(to: file)
+      }
     }
-    .menuBarExtraStyle(.window)
+  }
+
+  @objc private func toggle() {
+    guard let popover, let button = statusItem?.button else { return }
+    if popover.isShown {
+      popover.performClose(nil)
+      return
+    }
+    popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    // The popover's window has to be made key for the text field to accept
+    // typing: an accessory app is not active, so nothing in it has focus by
+    // default and the field would look ready while swallowing every keystroke.
+    popover.contentViewController?.view.window?.makeKey()
   }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-  func applicationDidFinishLaunching(_ notification: Notification) {
-    // Accessory, not regular: no Dock icon and no menu bar of its own. JevBar
-    // lives in the status bar and must never become the frontmost application
-    // by accident, since that is the window it would then be reading.
-    NSApp.setActivationPolicy(.accessory)
+@main
+enum Main {
+  @MainActor
+  static func main() {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    // Held for the process's lifetime: `NSApplication.delegate` is a weak
+    // reference, and a delegate that is deallocated takes the status item with
+    // it, leaving the same invisible-but-running app this replaced.
+    objc_setAssociatedObject(app, "jevbar.delegate", delegate, .OBJC_ASSOCIATION_RETAIN)
+    app.run()
   }
 }
 
