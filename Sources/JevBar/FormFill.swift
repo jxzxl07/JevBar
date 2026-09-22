@@ -57,8 +57,7 @@ struct FormFill: Sendable {
   /// `School`, `Degree` and `Pronouns` on a real application came back as "the
   /// page would not keep this value", because a text write cannot set a
   /// dropdown at all. They are opened and the matching option is pressed —
-  /// which is what a person does, and what `commitSuggestions` already does for
-  /// an autocomplete.
+  /// which is what a person does.
   static let chooserRoles: Set<String> = ["PopUpButton", "MenuButton", "Menu"]
 
   func fillVisible(screen: Screen, task: TaskKind) async -> FillResult {
@@ -262,28 +261,18 @@ struct FormFill: Sendable {
          handled by `fillWholeForm`, which scrolls once per pass and looks
          again.
         */
+        // Focused first: the Return below goes to whatever has focus, and a
+        // field written into without being focused is a field the keystroke
+        // will miss.
+        _ = try? await engine.call("click", ["element_id": field.id])
+
         // `set_value` replaces the whole field in one step rather than typing
         // into it, so there are no keystrokes to lose and nothing to append to.
         _ = try await engine.call("set_value", ["element_id": field.id, "value": value])
 
-        /*
-         A list is committed here, not later.
-
-         This used to happen once at the end, over everything written. By then
-         every dropdown had closed — a list is only open while its own field has
-         focus, and focus had moved on five fields ago. So the right value was
-         typed, the right row was highlighted, and moving to the next field
-         threw it away. Worse, the ids read at the end belonged to a snapshot
-         taken after the page had changed, so clicking one landed on whatever
-         row now held that id: "Southend-on-Sea" committed as "North Sumatra,
-         Indonesia".
-
-         Committing while the list is still open is the whole of the fix, and it
-         is why this costs a round trip per combobox rather than one per form.
-        */
-        if Self.listRoles.contains(field.role) {
-          await commitOpenList(field: field, value: value, app: screen.app, task: task)
-        }
+        // Return commits what was typed. Focus first, because the keystroke
+        // goes to whatever has it.
+        await commitWithReturn(field: field, task: task)
 
         written.append((id: field.id, label: field.name, key: key, value: value))
       } catch {
@@ -399,125 +388,35 @@ struct FormFill: Sendable {
     return outcomes
   }
 
-  /// Choose the suggestion an autocomplete is offering, rather than pressing Enter.
+  /// Press Return, so the field keeps what was just typed into it.
   ///
-  /// ## Why not Enter
+  /// ## Why every field, and why this took four attempts
   ///
-  /// Typing "Southend" into a location field opens a list and leaves the field
-  /// holding a fragment; something has to commit the choice. The obvious
-  /// keystroke is Return — and in a text input Return submits the form on a
-  /// large fraction of sites. On a job application that is the single action
-  /// JevBar must never take, and "press Return after every field" would put a
-  /// submission one keystroke away sixty times per form. §3 is not a rule to be
-  /// worked around with a keystroke that usually does something else.
+  /// `press_key` has **no element id**. Its own description says the key goes
+  /// to the focused app — and every Return sent before this passed an
+  /// `element_id`, which was ignored, with nothing having focused the field. So
+  /// the keystroke went wherever focus happened to be, and the dropdown it was
+  /// meant to commit never saw it. Three rounds of "the dropdown still is not
+  /// selected" were that: not a timing problem, and not the wrong row.
   ///
-  /// Clicking the suggestion is what a person does, it commits the same choice,
-  /// and it goes through the policy like every other press — so a list item that
-  /// somehow reads "Submit application" is refused rather than clicked.
-  private func commitSuggestions(
-    on screen: Screen,
-    for fields: [(id: String, label: String, key: String, value: String)],
-    task: TaskKind
-  ) async {
-    for field in fields {
-      // The suggestion says more than was typed — "Southend-on-Sea, England,
-      // United Kingdom" for "Southend-on-Sea" — so a match is a prefix, not an
-      // equality. Case-folded, because a list often title-cases what it shows.
-      let wanted = field.value.lowercased()
-      guard
-        let suggestion = screen.controls.first(where: { control in
-          Self.suggestionRoles.contains(control.role)
-            && control.name.lowercased().hasPrefix(wanted)
-            && control.id != field.id
-        })
-      else {
-        await commitWithReturn(field, on: screen, task: task)
-        continue
-      }
-
-      guard case .allow = authorize(
-        Action(verb: .click, controlName: suggestion.name, value: nil), in: task)
-      else { continue }
-
-      _ = try? await engine.call("click", ["element_id": suggestion.id])
-    }
-  }
-
-  /// Press Return on a list whose highlighted option is not in the tree.
+  /// Focus is therefore explicit: click the field, write into it, press Return.
   ///
-  /// ## Why this exists, having been refused twice
+  /// ## The one thing still checked
   ///
-  /// Some comboboxes render their menu somewhere the accessibility tree does
-  /// not reach, so there is no option to click: the value is typed, the right
-  /// row is visibly highlighted, and nothing commits it. Stripe's Degree field
-  /// does exactly this. Return is what a person presses there.
-  ///
-  /// The objection to Return was never that it does not work — it is that in a
-  /// *text input* it submits the form, and on a job application that is the one
-  /// action JevBar must never take. So this is not "press Return after every
-  /// field". It fires only when all of these hold:
-  ///
-  ///  - the control is a combobox or a chooser, never a plain text field;
-  ///  - a list was open and offered nothing this code could click;
-  ///  - the control's own accessible name is not submit-shaped;
-  ///  - the policy allows it, checked as an ordinary effect.
-  ///
-  /// A plain text field never reaches here, which is the property that makes
-  /// this safe rather than the promise that a page will behave.
-  private func commitWithReturn(
-    _ field: (id: String, label: String, key: String, value: String),
-    on screen: Screen,
-    task: TaskKind
-  ) async {
-    guard let control = screen.control(id: field.id) else { return }
-    guard Self.chooserRoles.contains(control.role) || control.role == "ComboBox" else { return }
-
-    // The same authorization any press gets. A control named "Submit
-    // application" is refused here exactly as it would be under a click.
-    guard case .allow = authorize(
-      Action(verb: .pressKey, controlName: control.name, value: "return"), in: task)
-    else { return }
-
-    _ = try? await engine.call("press_key", ["key": "return", "element_id": field.id])
-  }
-
-  /// Roles that open a list when written into.
-  static let listRoles: Set<String> = ["ComboBox", "PopUpButton", "MenuButton", "SearchField"]
-
-  /// Commit the list this field has open, right now, while it still is.
-  ///
-  /// Clicking the offered row is preferred, because it is unambiguous: the row
-  /// says what will be chosen. Return is the fallback for a list rendered
-  /// somewhere the accessibility tree cannot see — Stripe's Country picker is
-  /// one — and it is bounded to this moment: a combobox with a list open, whose
-  /// own name the policy has cleared. A plain text field never reaches here.
-  private func commitOpenList(
-    field: Control, value: String, app: String, task: TaskKind
-  ) async {
-    // A list renders on the next frame; reading before it does sees the page
-    // without it and concludes there is nothing to commit.
-    try? await Task.sleep(for: .milliseconds(450))
-    guard let open = try? await reread(app: app) else { return }
-
-    let wanted = value.lowercased()
-    let row = open.controls.first { control in
-      control.id != field.id
-        && Self.suggestionRoles.contains(control.role)
-        && control.name.lowercased().hasPrefix(wanted)
-    }
-
-    if let row {
-      guard case .allow = authorize(
-        Action(verb: .click, controlName: row.name, value: nil), in: task)
-      else { return }
-      _ = try? await engine.call("click", ["element_id": row.id])
-      return
-    }
-
+  /// Return in a text input submits a form on many sites, and on a job
+  /// application that is the action that must never happen. The field's own
+  /// accessible name goes through the policy first, so a control named "Submit
+  /// application" is refused. It costs nothing, and it is the only thing
+  /// between "commit this dropdown" and "send this application".
+  private func commitWithReturn(field: Control, task: TaskKind) async {
     guard case .allow = authorize(
       Action(verb: .pressKey, controlName: field.name, value: "return"), in: task)
     else { return }
-    _ = try? await engine.call("press_key", ["key": "return", "element_id": field.id])
+
+    // A list renders on the next frame, and a Return that arrives before it
+    // does commits nothing.
+    try? await Task.sleep(for: .milliseconds(350))
+    _ = try? await engine.call("press_key", ["key": "return"])
   }
 
   /// Roles a page uses for the rows of an autocomplete.
