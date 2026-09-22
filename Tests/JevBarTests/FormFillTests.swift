@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import JevBar
@@ -159,5 +160,40 @@ struct SuggestionTests {
     let rows = ["London, England", "Southend-on-Sea, England, United Kingdom"]
     let wanted = "southend-on-sea"
     #expect(rows.first { $0.lowercased().hasPrefix(wanted) } == rows[1])
+  }
+}
+
+@Suite("Answering the open questions")
+struct DocumentTests {
+  @Test("a CV in the named folder is read as text")
+  func readsTheCV() {
+    // The path the profile actually holds. Skipped rather than failed on a
+    // machine that has no CV there, because this asserts the reading works,
+    // not that everyone has one.
+    let documents = Documents.load(from: NSHomeDirectory() + "/Desktop/career/Applications")
+    guard !documents.isEmpty else { return }
+
+    #expect(documents.cv?.isEmpty == false)
+    // A CV that parsed to layout noise rather than words would pass an
+    // is-not-empty check and fail at the only thing it is for.
+    #expect((documents.cv?.split(separator: " ").count ?? 0) > 50)
+  }
+
+  @Test("a folder with nothing in it is empty rather than an error")
+  func toleratesNoDocuments() {
+    #expect(Documents.load(from: "/nowhere/at/all").isEmpty)
+    #expect(Documents.load(from: nil).isEmpty)
+  }
+
+  @Test("a question is recognised as wanting prose")
+  func spotsOpenQuestions() {
+    let area = Control(id: "e1", role: "TextArea", name: "Cover letter", value: nil, depth: 0)
+    let question = Control(
+      id: "e2", role: "TextField", name: "Why do you want to work at Stripe?", value: nil, depth: 0)
+    let plain = Control(id: "e3", role: "TextField", name: "Postcode", value: nil, depth: 0)
+
+    #expect(isOpenEnded(area))
+    #expect(isOpenEnded(question))
+    #expect(!isOpenEnded(plain))
   }
 }

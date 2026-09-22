@@ -39,6 +39,7 @@ struct FormFill: Sendable {
   let engine: Engine
   let profile: Profile
   let think: Think?
+  let documents: Documents
 
   /// Roles worth trying to fill. A button is not a field, and neither is a label.
   ///
@@ -107,7 +108,42 @@ struct FormFill: Sendable {
       }
     }
 
+    /*
+     The questions a key-value store cannot answer.
+
+     "Why this company" and "tell us about a project you are proud of" are not
+     boxes with a fact behind them; they are asked of a person. A profile has
+     nothing to offer, so these were becoming questions — which is the agent
+     asking the applicant to write their own application.
+
+     The CV answers them, and the cover letters beside it are previous answers
+     to almost exactly these questions. Drafted here, reviewed by the user
+     before anything is sent, because the run ends at human review.
+    */
+    var drafted: [String: String] = [:]
+    let openEnded = fields.filter { field in
+      isOpenEnded(field) && keys[field.id].flatMap { known[$0] } == nil
+        && !credentialLabel(field.name)
+    }
+    if !openEnded.isEmpty, let think, !documents.isEmpty {
+      drafted = await draftAnswers(for: openEnded, facts: known, using: think)
+    }
+
     for field in fields {
+      // A drafted answer belongs to this field alone, so it is written straight
+      // through rather than stored: "why this company" has a different answer
+      // for every company, and keeping the first one would put Stripe's answer
+      // on Palantir's form.
+      if let draft = drafted[field.id] {
+        do {
+          _ = try await engine.call("set_value", ["element_id": field.id, "value": draft])
+          written[field.id] = (label: field.name, key: "drafted", value: draft)
+        } catch {
+          outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
+        }
+        continue
+      }
+
       guard let key = keys[field.id] else {
         outcomes.append(.init(label: field.name, state: .skipped("nothing in your profile names this")))
         continue
@@ -376,6 +412,76 @@ extension FormFill {
       grounded[id] = text
     }
     return grounded
+  }
+}
+
+/// Whether a field wants prose rather than a value.
+///
+/// A text area is the strongest signal — nobody uses one for a postcode — and a
+/// label phrased as a question is the other. Length matters too: "Why do you
+/// want to work at Stripe?" is not a label, it is a question wearing one.
+func isOpenEnded(_ field: Control) -> Bool {
+  if field.role == "TextArea" { return true }
+  let label = field.name
+  return label.contains("?") || label.split(separator: " ").count >= 6
+}
+
+extension FormFill {
+  /// Draft an answer to a question, from the CV and how you have written before.
+  ///
+  /// Grounded, and told to say nothing rather than invent: an application is
+  /// the worst possible place for a plausible sentence that is not true, and
+  /// the person whose name is on it is not in the room when it is written.
+  ///
+  /// One request for every open question on the form, because a form asking
+  /// three of them should cost one round trip rather than three.
+  fileprivate func draftAnswers(
+    for fields: [Control], facts: [String: String], using think: Think
+  ) async -> [String: String] {
+    let profileText =
+      facts.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+    let questions = fields.map { "\($0.id): \($0.name)" }.joined(separator: "\n")
+
+    let system = """
+      You draft answers to job-application questions, as the applicant, in the
+      first person.
+
+      Reply with JSON only: {"answers": {"<element id>": "<answer or null>"}}
+
+      Rules:
+      - Use only the CV, the facts, and the previous letters. Never invent an
+        employer, a grade, a date, a project or a technology that is not there.
+      - Answer null when the documents do not support an answer. A missing
+        answer is better than a plausible one that is not true.
+      - Match the applicant's own voice, taken from the previous letters.
+      - Two to four sentences unless the question asks for more.
+      - Never write anything about a password, a salary expectation, or a
+        protected characteristic.
+      """
+
+    let user = """
+      \(documents.grounding)
+
+      Facts:
+      \(profileText)
+
+      Questions:
+      \(questions)
+      """
+
+    guard
+      let reply = try? await think.ask(system: system, user: user),
+      let answers = reply["answers"] as? [String: Any]
+    else { return [:] }
+
+    var drafted: [String: String] = [:]
+    for (id, value) in answers {
+      guard let text = value as? String, text.count > 20, text.lowercased() != "null",
+        let field = fields.first(where: { $0.id == id }), !credentialLabel(field.name)
+      else { continue }
+      drafted[id] = text
+    }
+    return drafted
   }
 }
 

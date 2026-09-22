@@ -171,7 +171,12 @@ actor Agent {
         return await fail("\(error)", runId: runId, step: number, performed: performed)
       }
 
-      let filler = FormFill(engine: engine, profile: profile, think: think)
+      // Read once per run: a CV does not change while a form is being filled,
+      // and re-reading a PDF for every field would be the same waste as
+      // re-observing the screen for every field.
+      let documents = Documents.load(from: await profile.value(for: "cvPath"))
+      let filler = FormFill(
+        engine: engine, profile: profile, think: think, documents: documents)
       let result = await filler.fill(screen: screen, task: step.kind)
 
       guard !result.outcomes.isEmpty else {
