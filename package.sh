@@ -1,27 +1,34 @@
 #!/bin/bash
-# Build JevBar.app: a signed, self-contained menu-bar application.
+# Build, sign and install JevBar.app, then restart it.
 #
-# Signed with a stable identity from the very first build. macOS ties
-# Accessibility and Keychain grants to an application's designated requirement,
-# and an ad-hoc signature has no stable identity for one — so the requirement
-# degrades to a hash of the binary and every rebuild silently revokes the grant
-# while the toggle in System Settings still reads "on". JevDesk lost most of a
-# day to that twice.
+# ## Why it is assembled outside the repository
+#
+# This checkout is on the Desktop, which is FileProvider-synced, and the sync
+# daemon re-attaches `com.apple.FinderInfo` to anything that appears there —
+# asynchronously, so clearing extended attributes and then signing is a race
+# rather than a sequence. Retrying narrows it; staging where nothing watches
+# removes it. The bundle is signed in a temporary directory and only then
+# carried to its home.
+#
+# ## Why it installs to ~/Applications
+#
+# macOS ties an Accessibility grant to the application's signature *and* its
+# path. A stable path plus a stable signing identity is what lets a rebuild
+# inherit the permission you already gave, instead of asking again every time.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$ROOT/dist/JevBar.app"
+STAGE="$(mktemp -d)"
+APP="$STAGE/JevBar.app"
+INSTALLED="$HOME/Applications/JevBar.app"
 IDENTITY="JevBar Local Signing"
+trap 'rm -rf "$STAGE"' EXIT
 
 swift build -c release --product JevBar
 
-rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/.build/release/JevBar" "$APP/Contents/MacOS/JevBar"
 
-# The engine travels inside the bundle. Never referenced by a path built from
-# the working directory, which is the filesystem root once this is launched
-# from Finder.
 ENGINE="${JEVBAR_ENGINE:-$ROOT/../JevDesk/native/cua/.build/munim-computer-use}"
 if [ -f "$ENGINE" ]; then
   cp "$ENGINE" "$APP/Contents/Resources/munim-computer-use"
@@ -50,53 +57,44 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-# Extended attributes come along with a filesystem copy and codesign refuses a
-# bundle carrying them. A synced folder re-attaches them asynchronously, so the
-# copy is made without them rather than stripped afterwards, which is a race.
-xattr -cr "$APP" 2>/dev/null || true
-
-# The engine is signed on its own, before the bundle.
-#
-# `--deep` does not reach it. It re-signs recognised nested *code* — frameworks,
-# embedded app bundles — and a plain executable under Resources/ is resource
-# data as far as codesign is concerned. That matters because the engine is a
-# separate process with its own signature, and it is the one that asks for
-# Accessibility: signing only the app fixes the requirement for the process that
-# does not need the permission and leaves it broken for the one that does.
+# Everything that goes into the bundle is written before signing. Writing a
+# single byte afterwards breaks the seal, and macOS refuses an invalid
+# signature's permissions — which looks exactly like a permission that was
+# never granted.
 sign_all() {
   local id="$1"
   if [ -f "$APP/Contents/Resources/munim-computer-use" ]; then
+    # `--deep` does not reach a plain executable under Resources/, and the
+    # engine is the process that asks for Accessibility — so signing only the
+    # app fixes the identity of the process that does not need the permission.
     codesign --force --sign "$id" "$APP/Contents/Resources/munim-computer-use"
   fi
-  # Clearing extended attributes and then signing is a race, not a sequence.
-  #
-  # This checkout is in a FileProvider-synced directory, so macOS re-attaches
-  # com.apple.FinderInfo asynchronously — often between the clear and the sign,
-  # which fails with "resource fork, Finder information, or similar detritus".
-  # It lost about one build in three. Retrying on exactly that error is the
-  # remedy; retrying on anything else would hide a real signing failure.
-  local attempt
-  for attempt in 1 2 3; do
-    xattr -cr "$APP" 2>/dev/null || true
-    if codesign --force --deep --sign "$id" "$APP" 2>/tmp/jevbar-codesign.err; then
-      return 0
-    fi
-    grep -q "detritus" /tmp/jevbar-codesign.err || { cat /tmp/jevbar-codesign.err >&2; return 1; }
-    sleep 1
-  done
-  echo "  ! codesign kept failing on extended attributes" >&2
-  cat /tmp/jevbar-codesign.err >&2
-  return 1
+  codesign --force --deep --sign "$id" "$APP"
 }
 
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
   sign_all "$IDENTITY"
-  echo "  signed with '$IDENTITY' — permissions will survive rebuilds"
 else
   sign_all -
   echo "  ! signed ad-hoc. macOS will forget Accessibility on every rebuild."
   echo "    Run ./signing-identity.sh once to fix that."
 fi
 
-echo
-echo "JevBar.app is in $ROOT/dist"
+codesign -v --deep --strict "$APP"
+
+# The running copy is replaced, so it is asked to quit first — a bundle
+# swapped underneath a live process is a process running code that no longer
+# exists on disk.
+pkill -f "$INSTALLED/Contents/MacOS/JevBar" 2>/dev/null || true
+sleep 1
+
+rm -rf "$INSTALLED"
+mkdir -p "$HOME/Applications"
+ditto --noextattr --norsrc --noacl "$APP" "$INSTALLED"
+
+if [ "${JEVBAR_NO_LAUNCH:-}" != "1" ]; then
+  open "$INSTALLED"
+  echo "JevBar restarted — $INSTALLED"
+else
+  echo "JevBar installed — $INSTALLED"
+fi

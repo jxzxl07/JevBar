@@ -45,11 +45,25 @@ screenshot only when the tree is not descriptive enough.
 ## Building
 
 ```bash
-swift build
-swift test
+./signing-identity.sh   # once per machine
+make                    # build, sign, install to ~/Applications, restart
+make test
 ```
 
-Requires macOS 14+, Swift 6.1, and Accessibility permission granted to JevBar.
+`make` is the whole development loop. A native app has no hot reload, so a code
+change means a new binary — but nothing about permissions has to be repeated.
+The signing identity and the install path are both stable, and that is what lets
+an Accessibility grant survive a rebuild rather than being asked for again every
+time.
+
+The bundle is assembled and signed in a temporary directory, not in the
+checkout. This repository lives on a synced folder, and the sync daemon attaches
+extended attributes to anything that appears there — asynchronously, so clearing
+them and then signing is a race. A signature made where nothing is watching
+survives the move; one made afterwards is a coin toss.
+
+Requires macOS 14+, Swift 6.1, and Accessibility permission granted to JevBar
+(System Settings → Privacy & Security → Accessibility → `~/Applications/JevBar.app`).
 
 ## Licence
 

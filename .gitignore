@@ -1,5 +1,6 @@
 .build/
 dist/
+.build/
 *.xcuserstate
 .DS_Store
 .env
