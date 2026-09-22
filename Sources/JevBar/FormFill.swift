@@ -372,6 +372,23 @@ struct FormFill: Sendable {
          It is also what demonstrably worked — Last Name and Email were filled
          by exactly this call, on the run before the change.
         */
+        /*
+         Cleared, then written.
+
+         `set_value` is documented as replacing a field's entire contents, and
+         on this page it appends: a form filled twice ends up with "JazilJazil"
+         and a phone number written out twice. A React input that ignores the
+         value it is handed and keeps its own state will do that — the
+         accessibility write lands after the component's own, not instead of it.
+         Writing an empty string first gives it nothing to append to.
+
+         Two calls rather than one, and the second is the only one that can be
+         wrong: if the clear fails, the write still replaces whatever the clear
+         left behind.
+        */
+        if live.value?.isEmpty == false {
+          _ = try? await engine.call("set_value", ["element_id": live.id, "value": ""])
+        }
         _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
 
 
