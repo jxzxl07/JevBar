@@ -63,12 +63,54 @@ struct Think: Sendable {
   var session: URLSession = .shared
 
   /// Ask for JSON matching a shape, and hand back the parsed object.
+  /// Ask for JSON matching a shape, hedged against the API's slow tail.
+  ///
+  /// ## Why the same question is asked more than once
+  ///
+  /// Measured against this key: an identical two-label request took 0.8s, then
+  /// 20s, then 0.6s, 0.9s, 0.9s, 20.8s. Roughly one request in four sits for
+  /// twenty seconds, independent of the prompt and of reasoning effort. A form
+  /// fill makes several of these, and waiting out the tail on each is what left
+  /// the bar on "Working…" with an untouched page for minutes.
+  ///
+  /// So a second copy is sent if the first has not answered in three seconds,
+  /// and a third at eight, and the first answer wins; the others are cancelled.
+  /// A slow request rarely repeats, so the typical wait stays under a second
+  /// and the worst case falls from twenty seconds to a few. The cost is an
+  /// extra request only in the cases that were already slow.
   func ask(system: String, user: String) async throws -> [String: Any] {
+    try await withThrowingTaskGroup(of: [String: Any].self) { group in
+      for delay in [0, 3, 8] {
+        group.addTask {
+          if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+          return try await askOnce(system: system, user: user)
+        }
+      }
+      defer { group.cancelAll() }
+
+      var lastError: Error = ThinkError.unreadable
+      while true {
+        do {
+          guard let answer = try await group.next() else { break }
+          return answer
+        } catch {
+          // One copy failing — a 429, a dropped connection — is not the
+          // question failing while another copy is still in flight.
+          lastError = error
+        }
+      }
+      throw lastError
+    }
+  }
+
+  private func askOnce(system: String, user: String) async throws -> [String: Any] {
     var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-    request.timeoutInterval = 30
+    // Short, because a slower copy is already on its way: this bounds one
+    // attempt, not the question.
+    request.timeoutInterval = 15
 
     let body: [String: Any] = [
       "model": config.model,
@@ -78,6 +120,10 @@ struct Think: Sendable {
       ],
       "response_format": ["type": "json_object"],
       "temperature": 0,
+      // Lower thinking effort. It does not remove the slow tail — that is the
+      // API — but these are lookups and short drafts, not problems to reason
+      // through, and less thinking is less time on every request.
+      "reasoning_effort": "low",
     ]
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 

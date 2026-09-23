@@ -95,6 +95,29 @@ struct FormFill: Sendable {
         unplaced.append(field)
       }
     }
+    /*
+     The model calls run side by side, not one after another.
+
+     Placing labels, inferring answers and drafting prose used to happen in
+     sequence, all before a single field was typed — and each can sit for
+     twenty seconds on the API's slow tail. So the page stayed untouched while
+     "Working…" ran for minutes.
+
+     Drafting does not depend on the other two: an open question is a text area
+     or a sentence with a question mark, and no profile fact answers it. So it
+     starts here, alongside them, and is collected when it is needed.
+    */
+    let profileNow = await profile.all()
+    let draftCandidates = fields.filter { field in
+      isOpenEnded(field) && keys[field.id].flatMap { profileNow[$0] } == nil
+        && !credentialLabel(field.name)
+    }
+    let canDraft = think != nil && !documents.isEmpty && !draftCandidates.isEmpty
+    async let draftedEarly: [String: String] =
+      canDraft
+      ? draftAnswers(for: draftCandidates, facts: profileNow, using: think!)
+      : [:]
+
     if !unplaced.isEmpty, let think {
       let resolved = await placeLabels(unplaced, using: think)
       keys.merge(resolved) { current, _ in current }
@@ -172,7 +195,8 @@ struct FormFill: Sendable {
       } else if documents.isEmpty {
         draftingSkipped = "I could not read your CV, so I had nothing to write from"
       } else {
-        drafted = await draftAnswers(for: openEnded, facts: known, using: think!)
+        // Already in flight since the top of the pass.
+        drafted = await draftedEarly
       }
     }
 
