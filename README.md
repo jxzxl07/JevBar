@@ -1,70 +1,66 @@
 # JevBar
 
-A native macOS menu-bar agent. Hold a key, say what you want, and it acts —
-in whatever application is in front of you.
+**A macOS desktop agent, with Jev.**
 
-Its first job is filling internship applications. Its second is ordinary desktop
-work. Its third is doing several things from one sentence.
+JevBar lives in your menu bar. Hold a key, say what you want, and it gets done in whatever application is in front of you. It fills in job applications, opens and closes apps, websites and folders, and handles several tasks from a single sentence.
 
-> **Status:** early. The safety contract and the engine bridge are in place and
-> tested; the bar, the planner and voice are being built. `PLAN.md` is the
-> current shape and the build order.
+https://github.com/jxzxl07/JevBar/raw/main/JevBar.mp4
 
-## What it will not do
+## Features
 
-These are product commitments, not settings. They have tests.
+- **Voice control.** Hold ⌘⇧Space and speak. A small overlay shows your words live as you talk. Speech recognition runs on your Mac.
+- **Application forms, filled completely.** Text fields, search boxes with suggestions, dropdowns, radio buttons, checkboxes and dates are all handled, in page order, scrolling through the whole form.
+- **Written answers from your CV.** Open questions and short essays are drafted with Gemini, grounded in your own CV and profile. Nothing is invented.
+- **Desktop tasks.** Open or close any app, open websites and folders, and search sites such as YouTube.
+- **Multi-step commands.** "Open YouTube and search Jev" or "open my Downloads folder, then close Safari" runs as one request.
+- **A clear report.** After filling a form, JevBar lists what it filled and what it left for you to answer.
 
-- **Job applications are never submitted.** JevBar fills a form in and stops at
-  human review. A control whose accessible name looks like final submission is
-  refused outright.
+## Safety
+
+These are product commitments, not settings, and each one is covered by tests.
+
+- **Applications are never submitted.** JevBar fills a form and stops for your review. Any control that looks like a final submit is refused.
 - **Passwords, passkeys and one-time codes are never entered or stored.**
-- **Nothing is sent to another person.** Send, reply, post, publish and call are
-  refused; JevBar prepares and you send.
-- **A model proposal is not permission.** A pure function authorizes every
-  effect, and it reads the control's name from the accessibility tree — never
-  the model's description of it.
-- **No model ever emits a coordinate**, a selector, or a name it invented. It
-  chooses an element id from a list JevBar built by looking at the screen.
+- **Nothing is sent on your behalf.** Send, reply, post and publish are refused. JevBar prepares, and you decide.
+- **Personal questions stay yours.** Grades, family, salary, demographics and offers from other companies are only answered from your saved profile, never guessed by a model.
+- **Every action is authorised in code.** A pure function checks each click and keystroke against the control's real accessible name, not the model's description of it.
+- **Models choose, they do not point.** A model picks an element from a list JevBar built by reading the screen. It never supplies coordinates or selectors.
 
 ## How it works
 
-JevBar is the head. The hands are
-[munim-computer-use](https://github.com/munimtechnologies/munim-computer-use)
-(Apache 2.0), a Swift MCP server that exposes the macOS accessibility tree with
-stable element ids and delivers input in the background, so the pointer stays
-yours.
+JevBar reads the screen through the macOS accessibility tree using [munim-computer-use](https://github.com/munimtechnologies/munim-computer-use) (Apache 2.0), a Swift MCP server that provides element ids and delivers input in the background. Because it works on the accessibility tree, the same approach applies to Safari, Chrome, Notes, Finder and native apps alike, with no browser extension required.
 
-That choice is why JevBar works everywhere rather than in one browser: Chrome,
-Safari, Notes, Mail, System Settings and a PDF are all the same accessibility
-tree. There is no browser extension, no pairing, and no debugging port.
+Common commands such as opening apps, searching sites and clicking named links are handled directly and deterministically. Form filling reads the page as a list of questions and uses a tested method for each kind of control. Gemini is used for open-ended answers and for decisions the rules do not cover.
 
-Deciding is split between two models, cheapest first: a typed, closed-choice
-model answers the common turn in about 180ms, and a multimodal model looks at a
-screenshot only when the tree is not descriptive enough.
+## Setup
 
-## Building
+Requirements: macOS 14 or later and Swift 6.1.
 
 ```bash
 ./signing-identity.sh   # once per machine
-make                    # build, sign, install to ~/Applications, restart
-make test
+make                    # build, sign, install to ~/Applications and relaunch
+make test               # run the test suite
 ```
 
-`make` is the whole development loop. A native app has no hot reload, so a code
-change means a new binary — but nothing about permissions has to be repeated.
-The signing identity and the install path are both stable, and that is what lets
-an Accessibility grant survive a rebuild rather than being asked for again every
-time.
+Then:
 
-The bundle is assembled and signed in a temporary directory, not in the
-checkout. This repository lives on a synced folder, and the sync daemon attaches
-extended attributes to anything that appears there — asynchronously, so clearing
-them and then signing is a race. A signature made where nothing is watching
-survives the move; one made afterwards is a coin toss.
+1. Grant Accessibility access in System Settings, under Privacy & Security, Accessibility, for `~/Applications/JevBar.app`.
+2. Add your Gemini key to `~/Library/Application Support/JevBar/.env`:
 
-Requires macOS 14+, Swift 6.1, and Accessibility permission granted to JevBar
-(System Settings → Privacy & Security → Accessibility → `~/Applications/JevBar.app`).
+   ```
+   REASONING_API_KEY=your-key
+   REASONING_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+   REASONING_MODEL=gemini-3.5-flash-lite
+   ```
+
+3. Add your details to your profile, stored locally at `~/Library/Application Support/JevBar/profile.json` with owner-only permissions. Point `cvPath` at your CV so answers can draw on it.
+
+Because the signing identity and install path stay the same, the Accessibility permission survives every rebuild. `make run` rebuilds and relaunches in the background.
+
+## Privacy
+
+Your profile, CV and API key stay on your Mac. Only the text needed to answer a question is sent to Gemini. Keys are never committed to this repository.
 
 ## Licence
 
-MIT. The computer-use engine it launches is Apache 2.0 and is not vendored here.
+MIT. The computer-use engine JevBar launches is Apache 2.0 and is not vendored here.
