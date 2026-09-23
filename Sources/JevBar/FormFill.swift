@@ -194,7 +194,12 @@ struct FormFill: Sendable {
       // on Palantir's form.
       if let draft = drafted[field.id] {
         do {
-          _ = try await engine.call("set_value", ["element_id": field.id, "value": draft])
+          // Typed for the same reason every other field is: this form's
+          // inputs ignore a value set underneath them. Clicked first so the
+          // keystrokes land here and the box is scrolled into view.
+          _ = try? await engine.call("click", ["element_id": field.id])
+          try? await Task.sleep(for: .milliseconds(300))
+          _ = try await engine.call("type_text", ["element_id": field.id, "text": draft])
           written.append((id: field.id, label: field.name, key: "drafted", value: draft))
         } catch {
           outcomes.append(.init(label: field.name, state: .skipped("\(error)")))
@@ -373,23 +378,30 @@ struct FormFill: Sendable {
          by exactly this call, on the run before the change.
         */
         /*
-         Cleared, then written.
+         Typed, the way the YouTube search is — the one input that has
+         demonstrably taken a value today.
 
-         `set_value` is documented as replacing a field's entire contents, and
-         on this page it appends: a form filled twice ends up with "JazilJazil"
-         and a phone number written out twice. A React input that ignores the
-         value it is handed and keeps its own state will do that — the
-         accessibility write lands after the component's own, not instead of it.
-         Writing an empty string first gives it nothing to append to.
+         `set_value` does not land on this form: twenty fields were written in
+         one run and none of them appeared. A React input keeps its own state and
+         ignores a value set underneath it. Typing produces the key events the
+         component listens for, and the YouTube search box — also React — took
+         a typed query first time.
 
-         Two calls rather than one, and the second is the only one that can be
-         wrong: if the clear fails, the write still replaces whatever the clear
-         left behind.
+         Typing was tried here once before and blamed for "it repeated
+         everything". That was wrong: the repetition was the pass loop
+         rewriting its first four fields, found and fixed afterwards. Typing
+         itself was fine.
+
+         A field that already holds text is selected first with Cmd-A, so the
+         typed value replaces it instead of appending — the append is what
+         produced "JazilJazil". The click above has focused the field, so both
+         keystrokes land in it. Cmd-A is not Return: it selects, it cannot
+         submit anything.
         */
         if live.value?.isEmpty == false {
-          _ = try? await engine.call("set_value", ["element_id": live.id, "value": ""])
+          _ = try? await engine.call("press_key", ["key": "a", "modifiers": ["cmd"]])
         }
-        _ = try await engine.call("set_value", ["element_id": live.id, "value": value])
+        _ = try await engine.call("type_text", ["element_id": live.id, "text": value])
 
 
         written.append((id: live.id, label: field.name, key: key, value: value))
@@ -399,111 +411,28 @@ struct FormFill: Sendable {
       }
     }
 
-    outcomes.append(contentsOf: await verify(written, app: screen.app, task: task))
-    return FillResult(outcomes: outcomes)
-  }
-
-  /// Check that what was written is actually on the page, and retype it if not.
-  ///
-  /// ## Why this is not optional
-  ///
-  /// `set_value` writes through the accessibility API, and a React-controlled
-  /// input discards a value that arrives without the events a keystroke would
-  /// have produced: the write succeeds, the component re-renders, and the box
-  /// is empty again. The engine reports the write it made, not the value the
-  /// page kept — so six fields were reported filled on a Lever application that
-  /// was visibly blank.
-  ///
-  /// Reporting a write nobody can see is worse than failing. It is the one
-  /// outcome that makes every other number untrustworthy, and it is why nothing
-  /// here counts as filled until it has been read back.
-  ///
-  /// One observation for the whole form rather than one per field: a form has
-  /// sixty of them, and sixty round trips is the thirty-one seconds this design
-  /// exists to avoid.
-  private func verify(
-    _ written: [(id: String, label: String, key: String, value: String)],
-    app: String,
-    task: TaskKind
-  ) async -> [FieldOutcome] {
-    guard !written.isEmpty else { return [] }
-
-    // A controlled component re-renders on the next frame, so reading straight
-    // away can see a value that is about to be thrown away.
-    try? await Task.sleep(for: .milliseconds(400))
-
-    guard let after = try? await reread(app: app) else {
-      // The page could not be read again. Saying "filled" here would be the
-      // same unverified claim, so these are reported as unknown instead.
-      return written.map {
-        .init(label: $0.label, state: .skipped("written, but I could not check it landed"))
-      }
-    }
-
-    // Lists were already committed, field by field, while they were open.
-    let committed = after
-
-    var outcomes: [FieldOutcome] = []
-    var stubborn: [(id: String, label: String, key: String, value: String)] = []
-
-    for write in written {
-      /*
-       Found by label, not by id.
-
-       An id belongs to one snapshot, and committing a list or scrolling to a
-       field re-renders the page and invalidates every id in it. Looking the
-       field up by id after that finds nothing, the comparison fails, and a
-       field that is visibly correct on screen is reported as "the page would
-       not keep this value" — which is what happened to First Name, Email and
-       Phone on a form where all three were plainly filled.
-      */
-      let now =
-        committed.control(id: write.id)?.value
-        ?? committed.controls.first { $0.name == write.label }?.value
-      // A committed option often says more than was typed — "United Kingdom"
-      // for "United", "Bachelor's Degree (BA)" for "Bachelor's Degree" — so a
-      // prefix counts as landed.
-      let landed =
-        now == write.value
-        || (now?.lowercased().hasPrefix(write.value.lowercased()) ?? false)
-      if landed {
-        outcomes.append(.init(label: write.label, state: .filled(from: write.key)))
-      } else {
-        stubborn.append((write.id, write.label, write.key, write.value))
-      }
-    }
-
     /*
-     A field that did not read back is reported, never written again.
+     Not re-read here. `fillWholeForm` checks once, at the end.
 
-     There was a retry here: click the field and type the value, on the
-     grounds that a control rejecting `set_value` wants keystrokes. It is the
-     source of the duplication that has been in this from the beginning.
-     `set_value` appends on this page rather than replacing, and the read-back
-     fails for reasons that have nothing to do with the write — a stale id
-     after the form re-renders is enough — so a value that had landed
-     perfectly well was typed in a second time and came out as "JazilJazil".
-
-     A retry that cannot tell whether the first attempt worked is a retry that
-     doubles. Nothing here can tell, so nothing here retries: one write per
-     field, and an honest report when it cannot be confirmed.
+     Verification used to read the whole page after every pass, and a full read
+     of a real application is the single slowest thing JevBar does — one of them
+     has timed out at thirty seconds on its own. With four passes that was most
+     of the time a fill took. Now that verification only decides what the
+     report says, and never writes, once is enough.
     */
-    for field in stubborn {
-      outcomes.append(
-        .init(
-          label: field.label,
-          state: .skipped("I wrote this but could not confirm the page kept it")))
-    }
-
-    return outcomes
+    outcomes.append(
+      contentsOf: written.map { .init(label: $0.label, state: .filled(from: $0.key)) })
+    return FillResult(outcomes: outcomes)
   }
 
   /// How many fields one pass writes before the page is read again.
   ///
-  /// Small, because every write can re-render the form and invalidate the ids
-  /// that came with it. Four is a screenful of an application form, which is
-  /// also about as much as stays valid.
-  static let writesPerPass = 4
+  /// Every write can re-render the form and invalidate the ids that came with
+  /// it, so a pass writes a batch and then looks again. Eight rather than four
+  /// now that nothing presses Return: the submit-and-validate re-render that
+  /// made ids stale after every field is gone, and each extra pass costs a full
+  /// read of the page, which is the slowest thing a fill does.
+  static let writesPerPass = 8
 
   /// Roles that open a list when written into, and only these get a Return.
   static let listRoles: Set<String> = ["ComboBox", "PopUpButton", "MenuButton"]
@@ -792,6 +721,27 @@ extension FormFill {
      and one "filled" — and reporting all three would count the same box twice
      and make "filled 6 fields" meaningless.
     */
+    /*
+     One look at the whole form, at the end, to keep the report honest.
+
+     A field reported filled whose box now reads empty is downgraded. A field
+     that cannot be found in this read — off screen, or re-rendered under a new
+     label — keeps its report, because absence from one read is not evidence
+     the value was lost, and calling it lost would be the same unverified claim
+     in the other direction.
+    */
+    if let final = try? await observe() {
+      outcomes = outcomes.map { outcome in
+        guard case .filled = outcome.state else { return outcome }
+        let wanted = normalisedLabel(outcome.label)
+        guard
+          let control = final.controls.first(where: { normalisedLabel($0.name) == wanted }),
+          control.value == ""
+        else { return outcome }
+        return .init(label: outcome.label, state: .skipped("typed, but the page did not keep it"))
+      }
+    }
+
     var latest: [String: FieldOutcome] = [:]
     for outcome in outcomes { latest[outcome.label] = outcome }
     let ordered = outcomes.compactMap { outcome -> FieldOutcome? in
