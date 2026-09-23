@@ -311,8 +311,8 @@ struct FormFill: Sendable {
        Reported, not silently skipped, so they are visibly the remaining work.
       */
       if Self.chooserRoles.contains(field.role) || Self.listRoles.contains(field.role) {
-        outcomes.append(
-          .init(label: field.name, state: .skipped("a dropdown — choose this one yourself")))
+        outcomes.append(await chooseFromList(field: field, value: value, key: key, app: screen.app, task: task))
+        writesThisPass += 1
         continue
       }
 
@@ -460,6 +460,86 @@ struct FormFill: Sendable {
 
   /// Roles that open a list when written into, and only these get a Return.
   static let listRoles: Set<String> = ["ComboBox", "PopUpButton", "MenuButton"]
+
+  /// Pick an answer from a dropdown: type it, then click the option it leaves.
+  ///
+  /// ## Why this can work now when five earlier attempts did not
+  ///
+  /// Every earlier attempt wrote the value with `set_value`, and on this form
+  /// `set_value` never lands — so the list was never actually filtered, and
+  /// whatever got clicked or committed was whatever the list happened to show.
+  /// That is where "ingdom" and "North Sumatra, Indonesia" came from. Typing
+  /// does land (it is how every text field fills now), so typing "United
+  /// Kingdom" really does leave a list with United Kingdom in it.
+  ///
+  /// ## How the option is found
+  ///
+  /// By asking the page for what is visible and contains the answer's text. A
+  /// filtered read only describes what is on screen, which was wrong for
+  /// finding fields below the fold and is exactly right here: an open list is
+  /// on screen. The list can take a moment to fill — a school or city search
+  /// goes to a server — so it is asked a few times before giving up.
+  ///
+  /// Nothing here presses Return. The option is clicked, the same as a person
+  /// would, and its name goes through the policy like any other press.
+  private func chooseFromList(
+    field: Control, value: String, key: String, app: String, task: TaskKind
+  ) async -> FieldOutcome {
+    do {
+      _ = try? await engine.call("click", ["element_id": field.id])
+      try? await Task.sleep(for: .milliseconds(300))
+      _ = try await engine.call("type_text", ["element_id": field.id, "text": value])
+    } catch {
+      return .init(label: field.name, state: .skipped("could not type into the list: \(error)"))
+    }
+
+    let wanted = normalisedLabel(value)
+    let probe = wanted.split(separator: " ").prefix(2).joined(separator: " ")
+    var offered: [String] = []
+
+    for _ in 0..<4 {
+      try? await Task.sleep(for: .milliseconds(600))
+      guard
+        let outline = try? await engine.call(
+          "get_app_state", ["app": app, "query": probe, "max_elements": 60])
+      else { continue }
+
+      let options = parseScreen(app: app, outline: outline).controls.filter { control in
+        control.id != field.id && !control.name.isEmpty && !isPageChrome(control)
+          // The box itself now contains the typed text, and so may the label
+          // above it; neither is an option.
+          && !Self.writableRoles.contains(control.role)
+          && normalisedLabel(control.name) != normalisedLabel(field.name)
+      }
+      offered = options.map(\.name)
+
+      let ranked =
+        options.first { normalisedLabel($0.name) == wanted }
+        ?? options.first { normalisedLabel($0.name).hasPrefix(wanted) }
+        ?? options.first { wanted.hasPrefix(normalisedLabel($0.name)) && $0.name.count > 1 }
+        ?? options.first { normalisedLabel($0.name).contains(wanted) }
+
+      guard let option = ranked else { continue }
+
+      guard case .allow = authorize(
+        Action(verb: .click, controlName: option.name, value: nil), in: task)
+      else {
+        _ = try? await engine.call("press_key", ["key": "escape"])
+        return .init(label: field.name, state: .refused("that option is not allowed"))
+      }
+
+      _ = try? await engine.call("click", ["element_id": option.id])
+      return .init(label: field.name, state: .filled(from: key))
+    }
+
+    // No option matched. Close the list so it does not swallow the next click,
+    // and record what it did offer — the next fix should be read, not guessed.
+    _ = try? await engine.call("press_key", ["key": "escape"])
+    await log?.lookupFailed(label: field.name, query: probe, offered: Array(offered.prefix(12)))
+    return .init(
+      label: field.name,
+      state: .skipped("the list did not offer \u{201C}\(value)\u{201D} — choose this one yourself"))
+  }
 
   /// Roles a page uses for the rows of an autocomplete.
   static let suggestionRoles: Set<String> = [

@@ -409,11 +409,12 @@ struct SingleWriteTests {
         .appendingPathComponent("Sources/JevBar/FormFill.swift"),
       encoding: .utf8)
 
-    // Two writes exist and both are first writes: one for a profile answer,
-    // one for a drafted answer. Neither is a retry. A third would be.
+    // Three writes exist and all are first writes: a profile answer, a drafted
+    // answer, and the text typed into a dropdown to filter it. None is a
+    // retry. A fourth would be.
     let typed = source.components(separatedBy: "engine.call(\"type_text\"").count - 1
     let set = source.components(separatedBy: "engine.call(\"set_value\"").count - 1
-    #expect(typed + set == 2, "a field must be written exactly once — found \(typed + set) write calls")
+    #expect(typed + set == 3, "a field must be written exactly once — found \(typed + set) write calls")
 
     // Verification, which is where the retry lived, no longer exists as a
     // separate pass that could grow one back.
