@@ -66,7 +66,8 @@ struct FormFill: Sendable {
     screen: Screen, task: TaskKind, alreadyDone: Set<String> = []
   ) async -> FillResult {
     let fields = screen.controls.filter {
-      Self.writableRoles.contains($0.role) && !$0.name.isEmpty
+      (Self.writableRoles.contains($0.role) || Self.nativeMenuRoles.contains($0.role))
+        && !$0.name.isEmpty
         && !isPageChrome($0)
         /*
          Fields this run has already finished with.
@@ -109,7 +110,7 @@ struct FormFill: Sendable {
     */
     let profileNow = await profile.all()
     let draftCandidates = fields.filter { field in
-      isOpenEnded(field) && keys[field.id].flatMap { profileNow[$0] } == nil
+      !Self.nativeMenuRoles.contains(field.role) && isOpenEnded(field) && keys[field.id].flatMap { profileNow[$0] } == nil
         && !credentialLabel(field.name)
     }
     let canDraft = think != nil && !documents.isEmpty && !draftCandidates.isEmpty
@@ -175,7 +176,7 @@ struct FormFill: Sendable {
     */
     var drafted: [String: String] = [:]
     let openEnded = fields.filter { field in
-      isOpenEnded(field) && keys[field.id].flatMap { known[$0] } == nil
+      !Self.nativeMenuRoles.contains(field.role) && isOpenEnded(field) && keys[field.id].flatMap { known[$0] } == nil
         && !credentialLabel(field.name)
     }
 
@@ -211,6 +212,22 @@ struct FormFill: Sendable {
        again keeps them fresh without a lookup per field.
       */
       if writesThisPass >= Self.writesPerPass { break }
+
+      /*
+       A native menu — an HTML <select> — is opened and its option chosen.
+
+       These were never reached before: the list of fields accepted only
+       text-like roles, so Citadel's Degree, Major, GPA Scale, sponsorship and
+       coding-preference menus were discarded before anything looked at them.
+
+       The menu ends the pass, like any dropdown, because opening it changes the
+       page and stales the ids that came with this pass.
+      */
+      if Self.nativeMenuRoles.contains(field.role) {
+        let answer = keys[field.id].flatMap { known[$0] }
+        outcomes.append(await chooseNative(field: field, answer: answer, facts: known, app: screen.app, task: task))
+        break
+      }
 
       // A drafted answer belongs to this field alone, so it is written straight
       // through rather than stored: "why this company" has a different answer
@@ -611,6 +628,121 @@ struct FormFill: Sendable {
       state: .skipped("the list did not offer \u{201C}\(value)\u{201D} — choose this one yourself"))
   }
 
+  /// Roles an HTML `<select>` is exposed as. Distinct from a React combobox.
+  static let nativeMenuRoles: Set<String> = ["PopUpButton", "MenuButton"]
+
+  /// Open a native menu and press the option that answers it.
+  ///
+  /// A native menu, unlike a React one, answers the engine's accessibility
+  /// press — so opening it and pressing an option is enough, with no typing and
+  /// no Return.
+  ///
+  /// The option is chosen from the menu's own list. If the profile holds an
+  /// answer, the option matching it is taken. If it does not — "preferred
+  /// coding language", "family members at Citadel" — the model is shown the
+  /// actual options with the profile and CV and asked to pick one of them or
+  /// none. It chooses a number from a list this code read off the page, so it
+  /// cannot invent an answer that is not on offer, and "none" leaves the menu
+  /// for the user rather than guessing.
+  private func chooseNative(
+    field: Control, answer: String?, facts: [String: String], app: String, task: TaskKind
+  ) async -> FieldOutcome {
+    guard case .allow = authorize(
+      Action(verb: .click, controlName: field.name, value: nil), in: task)
+    else { return .init(label: field.name, state: .refused("opening this menu is not allowed")) }
+
+    _ = try? await engine.call("click", ["element_id": field.id])
+    try? await Task.sleep(for: .milliseconds(500))
+
+    guard let open = try? await reread(app: app) else {
+      _ = try? await engine.call("press_key", ["key": "escape"])
+      return .init(label: field.name, state: .skipped("could not read the menu"))
+    }
+
+    // What the menu offers, without its placeholder.
+    let options = open.controls.filter { control in
+      control.role == "MenuItem" && !control.name.isEmpty
+        && !normalisedLabel(control.name).hasPrefix("select")
+    }
+    guard !options.isEmpty else {
+      _ = try? await engine.call("press_key", ["key": "escape"])
+      // The role name for a menu's options is an assumption about the engine.
+      // If it is wrong this is where it shows, so the roles actually present
+      // are written down for the next fix to read rather than guess.
+      let roles = Set(open.controls.map(\.role)).sorted().joined(separator: ", ")
+      await log?.lookupFailed(label: field.name, query: "menu options", offered: [roles])
+      return .init(label: field.name, state: .skipped("the menu did not open"))
+    }
+
+    var chosen: Control?
+    if let answer {
+      let wanted = normalisedLabel(answer)
+      let firstWord = wanted.split(separator: " ").first.map(String.init) ?? wanted
+      chosen =
+        options.first { normalisedLabel($0.name) == wanted }
+        ?? options.first { normalisedLabel($0.name).hasPrefix(wanted) }
+        ?? options.first { wanted.hasPrefix(normalisedLabel($0.name)) }
+        ?? options.first { normalisedLabel($0.name).contains(wanted) }
+        // "Bachelor's Degree" against a menu offering "Bachelors" or "BA/BS".
+        ?? options.first { normalisedLabel($0.name).hasPrefix(firstWord) && firstWord.count > 3 }
+    }
+    if chosen == nil, let think {
+      chosen = await pickOption(for: field.name, from: options, facts: facts, using: think)
+    }
+
+    guard let option = chosen else {
+      _ = try? await engine.call("press_key", ["key": "escape"])
+      return .init(label: field.name, state: .skipped("none of the options fits what I know — choose this one yourself"))
+    }
+
+    guard case .allow = authorize(
+      Action(verb: .click, controlName: option.name, value: nil), in: task)
+    else {
+      _ = try? await engine.call("press_key", ["key": "escape"])
+      return .init(label: field.name, state: .refused("that option is not allowed"))
+    }
+
+    _ = try? await engine.call("click", ["element_id": option.id])
+    return .init(label: field.name, state: .filled(from: answer == nil ? "chosen from the menu" : "profile"))
+  }
+
+  /// Ask the model which of a menu's own options answers a question.
+  private func pickOption(
+    for question: String, from options: [Control], facts: [String: String], using think: Think
+  ) async -> Control? {
+    let listed = options.enumerated().map { "\($0.offset): \($0.element.name)" }.joined(separator: "\n")
+    let profileText = facts.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }
+      .joined(separator: "\n")
+
+    let system = """
+      You answer one multiple-choice question on a job application, for the applicant.
+
+      Reply with JSON only: {"choice": <option number or null>}
+
+      Rules:
+      - Choose only an option number from the list.
+      - Choose only when the facts or CV support it. Otherwise null.
+      - Never guess about family, salary, demographics or anything the facts do
+        not state — null.
+      """
+    let user = """
+      Question: \(question)
+
+      Options:
+      \(listed)
+
+      Facts:
+      \(profileText)
+
+      \(String(documents.grounding.prefix(3_000)))
+      """
+
+    guard let reply = try? await think.ask(system: system, user: user),
+      let index = reply["choice"] as? Int, options.indices.contains(index)
+    else { return nil }
+    return options[index]
+  }
+
   /// Roles a page uses for the rows of an autocomplete.
   static let suggestionRoles: Set<String> = [
     "MenuItem", "Row", "Cell", "ListItem", "StaticText", "Link", "Button",
@@ -847,6 +979,20 @@ extension FormFill {
       }
 
       if fresh.isEmpty && pass > 0 { break }
+
+      if pass == 0 {
+        // Controls this code does not fill yet, named so the next fix is
+        // written from what the page contains rather than from a guess.
+        let unhandled = screen.controls.filter {
+          ["RadioButton", "CheckBox", "DateField", "DateTimeArea", "Slider"].contains($0.role)
+            || ($0.role.lowercased().contains("date"))
+        }
+        if !unhandled.isEmpty {
+          await log?.lookupFailed(
+            label: "not yet handled", query: "\(unhandled.count) controls",
+            offered: unhandled.prefix(12).map { "\($0.role): \($0.name.isEmpty ? "(no name)" : $0.name)" })
+        }
+      }
 
       let result = await fillVisible(screen: screen, task: task, alreadyDone: seen)
       let novel = result.outcomes.filter { !seen.contains(normalisedLabel($0.label)) }
