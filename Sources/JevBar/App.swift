@@ -103,6 +103,46 @@ final class BarModel: ObservableObject {
   /// Fields the last run could not answer: fact key to the label that asked.
   @Published var questions: [(key: String, label: String)] = []
   @Published var answer = ""
+  /// A Gemini key being typed into the first-run prompt.
+  @Published var keyDraft = ""
+
+  /// Whether the only thing missing is the model key, which the bar can fix itself.
+  var needsKey: Bool { ThinkConfig.load() == nil }
+
+  /// Save a pasted key, so a fresh download works without editing hidden files.
+  func saveKey() {
+    let key = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !key.isEmpty else { return }
+    let dir = supportDirectory()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let file = dir.appendingPathComponent(".env")
+    try? "GEMINI_API_KEY=\(key)\n".write(to: file, atomically: true, encoding: .utf8)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    keyDraft = ""
+    status = "Key saved. JevBar is ready."
+  }
+
+  /// Open the profile for editing, starting a blank one on first use.
+  func openProfile() {
+    let file = supportDirectory().appendingPathComponent("profile.json")
+    if !FileManager.default.fileExists(atPath: file.path) {
+      try? FileManager.default.createDirectory(
+        at: supportDirectory(), withIntermediateDirectories: true)
+      let blank = Self.profileTemplate.map { "  \"\($0)\": \"\"" }.joined(separator: ",\n")
+      try? "{\n\(blank)\n}\n".write(to: file, atomically: true, encoding: .utf8)
+      try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+    NSWorkspace.shared.open(
+      [file], withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"),
+      configuration: NSWorkspace.OpenConfiguration())
+  }
+
+  static let profileTemplate = [
+    "firstName", "lastName", "preferredName", "fullName", "email", "phone", "location",
+    "country", "citizenship", "university", "degree", "discipline", "educationStart",
+    "educationEnd", "graduationDate", "graduationYear", "linkedin", "github", "portfolio",
+    "rightToWork", "sponsorship", "familyAtCompany", "cvPath",
+  ]
   /// Called when a run ends, for the local debug channel.
   var onFinish: ((String, [String]) -> Void)?
 
@@ -251,7 +291,19 @@ struct BarView: View {
           .disabled(model.busy)
       }
 
-      if let readiness = model.readiness {
+      if model.needsKey {
+        Text("Paste a Gemini API key to get started.")
+          .font(.callout)
+        HStack {
+          SecureField("Gemini API key", text: $model.keyDraft)
+            .textFieldStyle(.roundedBorder)
+            .onSubmit { model.saveKey() }
+          Button("Save") { model.saveKey() }
+        }
+        Link("Get a free key at aistudio.google.com",
+             destination: URL(string: "https://aistudio.google.com/apikey")!)
+          .font(.caption)
+      } else if let readiness = model.readiness {
         Text(readiness)
           .font(.caption)
           .foregroundStyle(.orange)
@@ -290,6 +342,10 @@ struct BarView: View {
         Text(model.listening ? "listening — let go to run" : "⌘⇧Space to talk · return to run")
           .font(.caption2).foregroundStyle(.tertiary)
         Spacer()
+        Button("Profile") { model.openProfile() }
+          .buttonStyle(.plain)
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
         Button("Quit") { NSApp.terminate(nil) }
           .buttonStyle(.plain)
           .font(.caption2)

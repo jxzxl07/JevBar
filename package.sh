@@ -29,12 +29,12 @@ swift build -c release --product JevBar
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/.build/release/JevBar" "$APP/Contents/MacOS/JevBar"
 
-ENGINE="${JEVBAR_ENGINE:-$ROOT/../JevDesk/native/cua/.build/munim-computer-use}"
-if [ -f "$ENGINE" ]; then
-  cp "$ENGINE" "$APP/Contents/Resources/munim-computer-use"
-else
-  echo "  ! computer-use engine not found at $ENGINE — JevBar will say so on launch"
+# The engine is built from pinned upstream source on first run.
+if [ -z "${JEVBAR_ENGINE:-}" ]; then
+  "$ROOT/build-engine.sh"
 fi
+ENGINE="${JEVBAR_ENGINE:-$ROOT/.build/engine/munim-computer-use}"
+cp "$ENGINE" "$APP/Contents/Resources/munim-computer-use"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -77,6 +77,10 @@ sign_all() {
   codesign --force --deep --sign "$id" "$APP"
 }
 
+# A stable local identity, created once, so Accessibility survives rebuilds.
+if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+  "$ROOT/signing-identity.sh" || true
+fi
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
   sign_all "$IDENTITY"
 else

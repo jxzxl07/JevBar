@@ -29,17 +29,15 @@ import Foundation
 /// fifth should ask nothing.
 actor Profile {
   private let file: URL
-  private var cache: [String: String]?
 
   init(file: URL = supportDirectory().appendingPathComponent("profile.json")) {
     self.file = file
   }
 
+  /// Read fresh each time: the file is small, and a person may have just
+  /// edited it from the bar's Profile button.
   func all() -> [String: String] {
-    if let cache { return cache }
-    let loaded = read()
-    cache = loaded
-    return loaded
+    read()
   }
 
   func value(for key: String) -> String? {
@@ -52,7 +50,6 @@ actor Profile {
     guard !isCredentialKey(key) else { return false }
     var facts = all()
     facts[key] = value
-    cache = facts
     write(facts)
     return true
   }
@@ -63,7 +60,6 @@ actor Profile {
   func forget(key: String) {
     var facts = all()
     facts.removeValue(forKey: key)
-    cache = facts
     write(facts)
   }
 
