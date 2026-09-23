@@ -32,28 +32,23 @@ Common commands such as opening apps, searching sites and clicking named links a
 
 ## Setup
 
-Requirements: macOS 14 or later and Swift 6.1.
+Requirements: macOS 14 or later, Xcode Command Line Tools (Swift 6.1) and git.
 
 ```bash
-./signing-identity.sh   # once per machine
-make                    # build, sign, install to ~/Applications and relaunch
-make test               # run the test suite
+git clone https://github.com/jxzxl07/JevBar.git
+cd JevBar
+make
 ```
+
+The first build takes a few minutes: it compiles the computer-use engine from its pinned open-source release and creates a local signing certificate. After that, JevBar appears in your menu bar.
 
 Then:
 
-1. Grant Accessibility access in System Settings, under Privacy & Security, Accessibility, for `~/Applications/JevBar.app`.
-2. Add your Gemini key to `~/Library/Application Support/JevBar/.env`:
+1. **Grant Accessibility access** in System Settings, under Privacy & Security, Accessibility, for `~/Applications/JevBar.app`. Allow the microphone and speech recognition the first time you hold ⌘⇧Space.
+2. **Add a Gemini API key.** Click the menu bar icon and paste your key. You can get one free at [aistudio.google.com](https://aistudio.google.com/apikey).
+3. **Fill in your profile.** Click **Profile** in the menu bar window and add your details. Set `cvPath` to your CV (a PDF) so written answers can draw on it. Anything a form asks that your profile does not cover, JevBar asks you once and remembers.
 
-   ```
-   REASONING_API_KEY=your-key
-   REASONING_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-   REASONING_MODEL=gemini-3.5-flash-lite
-   ```
-
-3. Add your details to your profile, stored locally at `~/Library/Application Support/JevBar/profile.json` with owner-only permissions. Point `cvPath` at your CV so answers can draw on it.
-
-Because the signing identity and install path stay the same, the Accessibility permission survives every rebuild. `make run` rebuilds and relaunches in the background.
+Rebuilding keeps your permissions, because the signing identity and install path stay the same. `make run` rebuilds and relaunches in the background, and `make test` runs the test suite.
 
 ## Privacy
 
