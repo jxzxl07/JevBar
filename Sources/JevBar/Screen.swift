@@ -12,6 +12,8 @@ struct Control: Equatable, Sendable {
   let value: String?
   /// How deep in the outline it sat, which is the only structure worth keeping.
   let depth: Int
+  /// Whether the outline marked it `(disabled)`.
+  var disabled: Bool = false
 }
 
 /// The frontmost window, as a list of things that can be acted on.
@@ -65,7 +67,8 @@ func parseScreen(app: String, outline: String) -> Screen {
         role: normaliseRole(firstWord(of: rest)),
         name: quoted(in: rest) ?? "",
         value: value(in: rest),
-        depth: depth))
+        depth: depth,
+        disabled: rest.contains("(disabled)")))
   }
 
   return Screen(app: app, controls: controls)

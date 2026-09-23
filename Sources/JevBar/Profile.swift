@@ -115,6 +115,8 @@ func factKey(forLabel label: String) -> String? {
 }
 
 private let knownFields: [(String, Set<String>)] = [
+  // First: "Preferred name" also says "name", and is not the full name.
+  ("preferredName", ["preferred"]),
   ("firstName", ["first", "forename", "given"]),
   ("lastName", ["last", "surname", "family"]),
   ("fullName", ["fullname", "name"]),
@@ -124,7 +126,7 @@ private let knownFields: [(String, Set<String>)] = [
   ("country", ["country"]),
   ("postcode", ["postcode", "zip", "postal"]),
   ("address", ["address", "street"]),
-  ("linkedin", ["linkedin"]),
+  ("linkedin", ["linkedin", "link"]),
   ("github", ["github"]),
   ("portfolio", ["portfolio", "website"]),
   ("university", ["university", "school", "college"]),
@@ -141,7 +143,6 @@ private let knownFields: [(String, Set<String>)] = [
   ("gender", ["gender"]),
   ("ethnicity", ["ethnicity", "race"]),
   ("pronouns", ["pronouns"]),
-  ("preferredName", ["preferred"]),
 ]
 
 /// Whether a key names something JevBar must never keep.

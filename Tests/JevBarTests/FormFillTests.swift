@@ -453,3 +453,35 @@ struct ComboBoxCommitTests {
     #expect(FormFill.identityKeys.contains("lastName"))
   }
 }
+
+@Test func preferredNameIsNotFullName() {
+  #expect(factKey(forLabel: "Preferred name") == "preferredName")
+}
+
+@Test func readsCitadelShapedQuestions() {
+  let outline = """
+    [e4] WebArea "Apply"
+      [e10] StaticText "Degree"
+      [e11] PopUpButton "- Select-"
+      [e12] Button "- Select-"
+      [e20] Group "Are you eligible to work in the UK?"
+        [e21] RadioButton "Yes" value="0"
+        [e22] RadioButton "No" value="0"
+      [e30] StaticText "Start Date"
+      [e31] DateTimeArea ""
+        [e32] Incrementor "day" value="0"
+        [e33] Incrementor "month" value="0"
+        [e34] Incrementor "year" value="0"
+    """
+  let qs = readQuestions(from: parseScreen(app: "Safari", outline: outline))
+  #expect(qs.map(\.kind) == [.select, .radio, .date])
+  #expect(qs[0].label == "Degree")
+  #expect(qs[1].options.count == 2)
+  #expect(parseDate("1 October 2025")?.month == 10)
+}
+
+@Test func forgivesBareKeys() {
+  let fixed = parseLenientJSON("```json\n{\n \"answers\": {\n  q0: \"Yes: really\",\n  q1: null,\n }\n}\n```")
+  let answers = fixed?["answers"] as? [String: Any]
+  #expect(answers?["q0"] as? String == "Yes: really")
+}

@@ -18,10 +18,11 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private var statusItem: NSStatusItem?
   private var popover: NSPopover?
-  private let model = BarModel()
+  let model = BarModel()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
+    registerDebugChannel()
 
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     item.button?.image = NSImage(
@@ -102,6 +103,8 @@ final class BarModel: ObservableObject {
   /// Fields the last run could not answer: fact key to the label that asked.
   @Published var questions: [(key: String, label: String)] = []
   @Published var answer = ""
+  /// Called when a run ends, for the local debug channel.
+  var onFinish: ((String, [String]) -> Void)?
 
   let voice = Voice()
   private let hotkey = Hotkey()
@@ -109,7 +112,7 @@ final class BarModel: ObservableObject {
 
   private let log = RunLog()
   private let profile = Profile()
-  private lazy var engine = Engine(executable: enginePath())
+  lazy var engine = Engine(executable: enginePath())
   private var agent: Agent?
 
   /// Whether everything the bar needs is present, said plainly rather than
@@ -205,6 +208,8 @@ final class BarModel: ObservableObject {
       // Asked in the order the form asks them, so answering follows the page.
       self.questions = await agent.pendingQuestions.map { (key: $0.key, label: $0.value) }
         .sorted { $0.label < $1.label }
+      self.onFinish?(result.message, result.steps)
+      self.onFinish = nil
       if result.outcome == .done { self.command = "" }
     }
   }

@@ -178,12 +178,10 @@ actor Agent {
       // and re-reading a PDF for every field would be the same waste as
       // re-observing the screen for every field.
       let documents = Documents.load(from: await profile.value(for: "cvPath"))
-      let filler = FormFill(
+      let driver = FormDriver(
         engine: engine, profile: profile, think: think, documents: documents, log: log)
-      // The whole form, scrolling as it goes — not the screenful that happened
-      // to be in view when the command was given.
-      let result = await filler.fillWholeForm(
-        observe: { try await self.observe(app: step.app) }, task: step.kind)
+      // Question by question through the whole page, scrolling as it goes.
+      let result = await driver.fill(app: screen.app, task: step.kind)
 
       guard !result.outcomes.isEmpty else {
         /*

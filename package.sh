@@ -52,6 +52,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>JevBar listens only while you hold its shortcut.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>JevBar turns what you say into a command, on this Mac.</string>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>com.jevbar.debug</string>
+    <key>CFBundleURLSchemes</key><array><string>jevbar</string></array>
+  </dict></array>
   <key>NSAppleEventsUsageDescription</key>
   <string>JevBar opens and closes the applications you name.</string>
 </dict></plist>

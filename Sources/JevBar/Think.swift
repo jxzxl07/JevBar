@@ -153,7 +153,7 @@ struct Think: Sendable {
       let choices = envelope["choices"] as? [[String: Any]],
       let message = choices.first?["message"] as? [String: Any],
       let content = message["content"] as? String,
-      let parsed = try? JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any]
+      let parsed = parseLenientJSON(content)
     else {
       throw ThinkError.unreadable
     }
@@ -181,4 +181,27 @@ enum ThinkError: Error, CustomStringConvertible {
     case .unreadable: return "The model replied with something that was not the shape asked for."
     }
   }
+}
+
+/// A model's JSON, forgiven the ways it gets JSON wrong.
+///
+/// The lite model asked for `{"answers": {"q0": ...}}` wrote `q0: "..."` —
+/// unquoted keys — and the strict parser threw away every answer in the batch,
+/// essay included. Code fences and trailing commas turn up too.
+func parseLenientJSON(_ text: String) -> [String: Any]? {
+  func parse(_ s: String) -> [String: Any]? {
+    try? JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any]
+  }
+  if let strict = parse(text) { return strict }
+  var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  if let open = s.firstIndex(of: "{"), let close = s.lastIndex(of: "}"), open < close {
+    s = String(s[open...close])
+  }
+  if let trimmed = parse(s) { return trimmed }
+  // Bare keys after `{` or `,` at the start of a line or after whitespace.
+  s = s.replacingOccurrences(
+    of: #"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:"#, with: "$1\"$2\":",
+    options: .regularExpression)
+  s = s.replacingOccurrences(of: #",\s*([}\]])"#, with: "$1", options: .regularExpression)
+  return parse(s)
 }
