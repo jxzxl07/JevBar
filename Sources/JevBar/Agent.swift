@@ -255,6 +255,18 @@ actor Agent {
      and doing it here costs nothing and cannot be got wrong by a model that
      was shown the wrong hundred and twenty controls.
     */
+    if let target = clickTarget(in: step.goal) {
+      switch await click(named: target, app: step.app, task: step.kind) {
+      case .success(let what):
+        performed.append(what)
+        return RunResult(outcome: .done, message: "Opened \(what).", steps: performed)
+      case .refused(let why):
+        return RunResult(outcome: .refused, message: why, steps: performed)
+      case .failure(let why):
+        await log.step(runId: runId, step: number, detail: "direct click failed: \(why)")
+      }
+    }
+
     if let query = searchQuery(in: step.goal) {
       switch await search(for: query, app: step.app, runId: runId, number: number) {
       case .success(let what):
@@ -470,6 +482,91 @@ actor Agent {
 
     await log.step(runId: runId, step: number, detail: "searched for \(query)")
     return .success("searched for \(query)")
+  }
+
+  /// Click the link or button a person named, once.
+  ///
+  /// Waits for it to appear, since the page was often opened a moment ago. In
+  /// a table of jobs, a company's name is a link to the company, but the person
+  /// saying "click Citadel" wants the posting: so when the match sits in a row
+  /// that also links to a role, the role is what is clicked.
+  private func click(named target: String, app: String?, task: TaskKind) async -> Performed {
+    let words = normalisedLabel(target).split(separator: " ").map(String.init)
+    guard !words.isEmpty else { return .failure("nothing to click") }
+    let roleWords = ["intern", "engineer", "analyst", "developer", "graduate", "software",
+                     "trader", "placement", "apprentice", "programme", "program"]
+
+    // "Open trackr then click Citadel": the second clause names no app, and
+    // the page is in the browser even when something else is in front.
+    let app = app ?? Self.browserInFront() ?? Self.defaultBrowser()
+    for _ in 0..<10 {
+      guard let screen = try? await observe(app: app) else {
+        try? await Task.sleep(for: .seconds(1))
+        continue
+      }
+      let all = screen.controls
+      let matches = all.indices.filter { i in
+        ["Link", "Button"].contains(all[i].role) && {
+          let name = normalisedLabel(all[i].name)
+          return words.allSatisfy { name.contains($0) }
+        }()
+      }
+      guard let best = matches.min(by: { all[$0].name.count < all[$1].name.count }) else {
+        try? await Task.sleep(for: .seconds(1))
+        continue
+      }
+
+      var chosen = all[best]
+      if let row = all[..<best].lastIndex(where: { $0.role == "Row" && $0.depth < all[best].depth }) {
+        var i = row + 1
+        while i < all.count, all[i].depth > all[row].depth {
+          let c = all[i]
+          let name = c.name.lowercased()
+          if c.role == "Link", c.id != chosen.id, roleWords.contains(where: { name.contains($0) }) {
+            chosen = c
+            break
+          }
+          i += 1
+        }
+      }
+
+      if case .refuse(let why) = authorize(
+        Action(verb: .click, controlName: chosen.name, value: nil), in: task)
+      {
+        return .refused(why)
+      }
+      let web = all.first { $0.role == "WebArea" }?.id
+      let plan = [nil] + Array(repeating: "down", count: 20) + Array(repeating: "up", count: 40)
+      for way in plan {
+        if let way, let web {
+          _ = try? await engine.call("scroll", ["element_id": web, "direction": way, "amount": 5])
+        }
+        do {
+          _ = try await engine.call("click", ["element_id": chosen.id])
+          return .success(chosen.name)
+        } catch Engine.Failure.tool(let message) where message.contains("not visible") {
+          continue
+        } catch {
+          return .failure("\(error)")
+        }
+      }
+      return .failure("could not scroll \(chosen.name) into view")
+    }
+    return .failure("no link or button called '\(target)'")
+  }
+
+  private static let browsers = ["Safari", "Google Chrome", "Arc", "Firefox", "Microsoft Edge", "Brave Browser"]
+
+  private static func browserInFront() -> String? {
+    let name = NSWorkspace.shared.frontmostApplication?.localizedName
+    return name.flatMap { browsers.contains($0) ? $0 : nil }
+  }
+
+  private static func defaultBrowser() -> String? {
+    guard let url = URL(string: "https://example.com"),
+      let app = NSWorkspace.shared.urlForApplication(toOpen: url)
+    else { return nil }
+    return FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
   }
 
   private func observe(app: String?) async throws -> Screen {

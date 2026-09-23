@@ -246,3 +246,17 @@ private func namedApp(in clause: String) -> String? {
   }
   return nil
 }
+
+/// What a clause asks to be clicked, if it asks: "click the Citadel link" is
+/// "citadel". Deterministic for the same reason as `searchQuery`: a model loop
+/// clicked the right link and then, not knowing it was done, kept clicking.
+func clickTarget(in clause: String) -> String? {
+  let pattern =
+    #"^\s*(?:click|tap)\s+(?:on\s+)?(?:the\s+)?(.+?)(?:\s+(?:link|button|tab|row))?\s*[.!]?\s*$"#
+  guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+    let match = regex.firstMatch(in: clause, range: NSRange(clause.startIndex..., in: clause)),
+    let range = Range(match.range(at: 1), in: clause)
+  else { return nil }
+  let target = clause[range].trimmingCharacters(in: .whitespaces)
+  return target.isEmpty ? nil : target
+}

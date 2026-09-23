@@ -490,3 +490,9 @@ struct ComboBoxCommitTests {
   #expect(factKey(forLabel: "Do you have family members that are currently employed at Citadel?") == "familyAtCompany")
   #expect(factKey(forLabel: "Family name") == "lastName")
 }
+
+@Test func readsClickTargets() {
+  #expect(clickTarget(in: "click the citadel link") == "citadel")
+  #expect(clickTarget(in: "Click Citadel.") == "Citadel")
+  #expect(clickTarget(in: "open youtube") == nil)
+}
