@@ -283,6 +283,20 @@ struct FormFill: Sendable {
        of being wrong in one direction is a field left empty; in the other it is
        a wrong answer on a real application, under someone's name.
       */
+      /*
+       A question is never answered with someone's name.
+
+       "Are you currently enrolled in a degree programme…?" was filled from
+       `lastName` — the model mapped the label to it — and "Imran" went into a
+       yes/no box. A label phrased as a question asks about the applicant; it is
+       never asking *for* one of their identifying details.
+      */
+      if isOpenEnded(field), Self.identityKeys.contains(key) {
+        outcomes.append(
+          .init(label: field.name, state: .skipped("this question is not asking for your \(key)")))
+        continue
+      }
+
       guard valueSuits(key: key, value: value) else {
         outcomes.append(
           .init(
@@ -457,6 +471,11 @@ struct FormFill: Sendable {
     return FillResult(outcomes: outcomes)
   }
 
+  /// Facts that identify the applicant, which a question never asks for.
+  static let identityKeys: Set<String> = [
+    "firstName", "lastName", "fullName", "preferredName", "email", "phone",
+  ]
+
   /// How many fields one pass writes before the page is read again.
   ///
   /// Every write can re-render the form and invalidate the ids that came with
@@ -545,7 +564,41 @@ struct FormFill: Sendable {
         return .init(label: field.name, state: .refused("that option is not allowed"))
       }
 
-      _ = try? await engine.call("click", ["element_id": option.id])
+      /*
+       How the option is committed depends on what kind of list it is.
+
+       A React-select dropdown — every list on the Stripe form — ignores the
+       engine's click. That click is an accessibility press, not a mouse event,
+       and React-select listens only for real mouse and keyboard events. A real
+       run proved it: every option was found, every "click" landed, and none was
+       selected.
+
+       Its keyboard contract is the dependable route. Typing filters the list
+       and highlights the first match; Return picks the highlighted option and
+       prevents the form's default submission. Return on this control can only
+       submit the form when the menu is closed, which is why it happens here
+       and nowhere else:
+
+        - the control is a combobox, never a text field — Return in a text
+          field is what submitted this form once before;
+        - it was typed into a moment ago, so it has focus;
+        - the fresh read above found a matching option, so the menu is open;
+        - the control's name has been through the policy like any press.
+
+       A native pop-up menu is different: it does answer the accessibility
+       press, so it keeps the click.
+      */
+      if field.role == "ComboBox" {
+        guard case .allow = authorize(
+          Action(verb: .pressKey, controlName: field.name, value: "return"), in: task)
+        else {
+          _ = try? await engine.call("press_key", ["key": "escape"])
+          return .init(label: field.name, state: .refused("choosing here is not allowed"))
+        }
+        _ = try? await engine.call("press_key", ["key": "return"])
+      } else {
+        _ = try? await engine.call("click", ["element_id": option.id])
+      }
       return .init(label: field.name, state: .filled(from: key))
     }
 

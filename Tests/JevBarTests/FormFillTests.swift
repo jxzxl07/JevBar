@@ -421,3 +421,35 @@ struct SingleWriteTests {
     #expect(!source.contains("private func verify("))
   }
 }
+
+@Suite("Choosing from a React-select dropdown")
+struct ComboBoxCommitTests {
+  @Test("Return to pick an option is authorized on a dropdown")
+  func returnAllowedOnDropdown() {
+    // React-select ignores the engine's accessibility press; its keyboard
+    // contract — type to filter, Return to pick — is the route that works.
+    #expect(
+      authorize(Action(verb: .pressKey, controlName: "Degree", value: "return"), in: .jobApplication)
+        == .allow)
+  }
+
+  @Test("and still refused on anything submit-shaped")
+  func returnRefusedOnSubmit() {
+    #expect(
+      authorize(
+        Action(verb: .pressKey, controlName: "Submit application", value: "return"),
+        in: .jobApplication) != .allow)
+  }
+
+  @Test("a question is never answered with an identifying detail")
+  func questionsAreNotNames() {
+    // "Are you currently enrolled in a degree programme…?" was filled from
+    // lastName, and "Imran" went into a yes/no box.
+    let question = Control(
+      id: "e196", role: "ComboBox",
+      name: "Are you currently enrolled in a degree programme, or did you complete a degree?",
+      value: nil, depth: 0)
+    #expect(isOpenEnded(question))
+    #expect(FormFill.identityKeys.contains("lastName"))
+  }
+}
