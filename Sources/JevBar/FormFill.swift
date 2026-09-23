@@ -473,35 +473,26 @@ struct FormFill: Sendable {
       }
     }
 
-    guard !stubborn.isEmpty else { return outcomes }
+    /*
+     A field that did not read back is reported, never written again.
 
-    var retyped: [(id: String, label: String, key: String, value: String)] = []
+     There was a retry here: click the field and type the value, on the
+     grounds that a control rejecting `set_value` wants keystrokes. It is the
+     source of the duplication that has been in this from the beginning.
+     `set_value` appends on this page rather than replacing, and the read-back
+     fails for reasons that have nothing to do with the write — a stale id
+     after the form re-renders is enough — so a value that had landed
+     perfectly well was typed in a second time and came out as "JazilJazil".
+
+     A retry that cannot tell whether the first attempt worked is a retry that
+     doubles. Nothing here can tell, so nothing here retries: one write per
+     field, and an honest report when it cannot be confirmed.
+    */
     for field in stubborn {
-      // The engine's own advice for a field that rejects `set_value`: focus it
-      // and type, which produces the events a controlled component listens for.
-      do {
-        _ = try await engine.call("click", ["element_id": field.id])
-        _ = try await engine.call("type_text", ["element_id": field.id, "text": field.value])
-        retyped.append(field)
-      } catch {
-        outcomes.append(.init(label: field.label, state: .skipped("\(error)")))
-      }
-    }
-
-    // And check *that* too. Claiming the fallback worked without looking would
-    // be the same unverified claim one step further down, which is exactly how
-    // this bug survived being fixed once already.
-    try? await Task.sleep(for: .milliseconds(400))
-    let settled = try? await reread(app: app)
-
-    for field in retyped {
-      let landed = settled?.control(id: field.id)?.value == field.value
       outcomes.append(
         .init(
           label: field.label,
-          state: landed
-            ? .filled(from: field.key)
-            : .skipped("the page would not keep this value")))
+          state: .skipped("I wrote this but could not confirm the page kept it")))
     }
 
     return outcomes

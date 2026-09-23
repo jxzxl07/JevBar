@@ -383,3 +383,33 @@ struct SkipDropdownTests {
     #expect(FormFill.writableRoles.contains("TextArea"))
   }
 }
+
+@Suite("Writing a field exactly once")
+struct SingleWriteTests {
+  @Test("the form path contains no second write")
+  func noRetypePath() throws {
+    /*
+     A structural check, because this bug came back four times.
+
+     Every version of it was a retry: set_value then type_text on failure,
+     click-and-type when a read-back mismatched, a second attempt after a
+     scroll. `set_value` appends on a React page rather than replacing, and a
+     read-back fails for reasons unrelated to the write — a stale id after a
+     re-render is enough — so a value that had landed was written again and
+     came out as "JazilJazil".
+
+     Asserting on the source is blunt, and it is the only thing that catches
+     the next well-meaning fallback before a form does.
+    */
+    let source = try String(
+      contentsOf: URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Sources/JevBar/FormFill.swift"),
+      encoding: .utf8)
+
+    let calls = source.components(separatedBy: "engine.call(\"type_text\"").count - 1
+    #expect(calls == 0, "the form path must never type into a field it has written")
+  }
+}
