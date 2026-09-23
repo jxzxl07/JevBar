@@ -4,8 +4,6 @@
 
 JevBar lives in your menu bar. Hold a key, say what you want, and it gets done in whatever application is in front of you. It fills in job applications, opens and closes apps, websites and folders, and handles several tasks from a single sentence.
 
-https://github.com/jxzxl07/JevBar/raw/main/JevBar.mp4
-
 ## Features
 
 - **Voice control.** Hold ⌘⇧Space and speak. A small overlay shows your words live as you talk. Speech recognition runs on your Mac.
