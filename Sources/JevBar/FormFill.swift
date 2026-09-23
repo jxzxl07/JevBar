@@ -312,8 +312,16 @@ struct FormFill: Sendable {
       */
       if Self.chooserRoles.contains(field.role) || Self.listRoles.contains(field.role) {
         outcomes.append(await chooseFromList(field: field, value: value, key: key, app: screen.app, task: task))
-        writesThisPass += 1
-        continue
+        /*
+         And the pass ends here.
+
+         Opening a dropdown re-renders the form, and every element id this pass
+         collected is stale afterwards: a real run went on to fail Phone,
+         Location, School, Degree and eleven more with "unknown element_id".
+         Stopping lets the next pass read the page again with ids that are
+         valid.
+        */
+        break
       }
 
       do {
@@ -497,21 +505,30 @@ struct FormFill: Sendable {
     let probe = wanted.split(separator: " ").prefix(2).joined(separator: " ")
     var offered: [String] = []
 
-    for _ in 0..<4 {
-      try? await Task.sleep(for: .milliseconds(600))
-      guard
-        let outline = try? await engine.call(
-          "get_app_state", ["app": app, "query": probe, "max_elements": 60])
-      else { continue }
+    for _ in 0..<3 {
+      try? await Task.sleep(for: .milliseconds(700))
+      /*
+       A full read, not a filtered one.
 
-      let options = parseScreen(app: app, outline: outline).controls.filter { control in
+       The filtered read returned nothing here too — "asked 'united kingdom',
+       got: nothing" with the list open on screen — so it cannot be relied on
+       for anything. A full read is slower and it is the one that parses.
+      */
+      guard let page = try? await reread(app: app) else { continue }
+
+      let options = page.controls.filter { control in
         control.id != field.id && !control.name.isEmpty && !isPageChrome(control)
           // The box itself now contains the typed text, and so may the label
           // above it; neither is an option.
           && !Self.writableRoles.contains(control.role)
           && normalisedLabel(control.name) != normalisedLabel(field.name)
       }
-      offered = options.map(\.name)
+      // For the log, only what could plausibly be an option for this answer;
+      // a full read has hundreds of names and the rest are noise.
+      let words = Set(wanted.split(separator: " ").map(String.init))
+      offered = options.map(\.name).filter { name in
+        !words.isDisjoint(with: normalisedLabel(name).split(separator: " ").map(String.init))
+      } + ["(\(options.count) controls read)"]
 
       let ranked =
         options.first { normalisedLabel($0.name) == wanted }
@@ -743,8 +760,8 @@ extension FormFill {
   func fillWholeForm(
     observe: () async throws -> Screen,
     task: TaskKind,
-    maxPasses: Int = 16,
-    budget: Duration = .seconds(180)
+    maxPasses: Int = 24,
+    budget: Duration = .seconds(300)
   ) async -> FillResult {
     var outcomes: [FieldOutcome] = []
     var seen: Set<String> = []
@@ -859,7 +876,9 @@ extension FormFill {
   /// Whether this outcome means "not yet", rather than "done".
   private func isRetryable(_ outcome: FieldOutcome) -> Bool {
     guard case .skipped(let why) = outcome.state else { return false }
-    return why.contains("not visible")
+    // A stale id means the page changed under this pass, not that the field
+    // failed. It is tried again with a fresh read, like a field off screen.
+    return why.contains("not visible") || why.contains("unknown element_id")
   }
 }
 
