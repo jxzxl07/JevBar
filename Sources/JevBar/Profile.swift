@@ -117,6 +117,8 @@ func factKey(forLabel label: String) -> String? {
 private let knownFields: [(String, Set<String>)] = [
   // First: "Preferred name" also says "name", and is not the full name.
   ("preferredName", ["preferred"]),
+  // Before lastName: "family members" is not "family name".
+  ("familyAtCompany", ["relatives", "relative", "members"]),
   ("firstName", ["first", "forename", "given"]),
   ("lastName", ["last", "surname", "family"]),
   ("fullName", ["fullname", "name"]),

@@ -284,6 +284,13 @@ struct FormDriver {
     return ["gpa", "grade", "score", "result", "mark"].contains { l.contains($0) }
   }
 
+  /// Questions only the applicant answers, unless their profile does.
+  static func personal(_ label: String) -> Bool {
+    let l = label.lowercased()
+    return ["family", "relative", "salary", "gender", "ethnic", "disab", "offer", "competing"]
+      .contains { l.contains($0) }
+  }
+
   static let noAnswer = "nothing I know answers this — left for you"
 
   // MARK: - Answers
@@ -510,7 +517,7 @@ struct FormDriver {
         let already = Set(chosen)
         var chosen: Control?
         if case .text(let value) = answer { chosen = bestOption(value, in: options) }
-        if chosen == nil, let think, !Self.asksForGrades(q.label) {
+        if chosen == nil, let think, !Self.asksForGrades(q.label), !Self.personal(q.label) {
           // Not an option already picked in another dropdown: "Preference 2"
           // the same as "Preference 1" is refused by the page.
           let fresh = options.filter { !already.contains($0.name) }

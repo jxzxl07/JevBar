@@ -485,3 +485,8 @@ struct ComboBoxCommitTests {
   let answers = fixed?["answers"] as? [String: Any]
   #expect(answers?["q0"] as? String == "Yes: really")
 }
+
+@Test func familyQuestionIsNotLastName() {
+  #expect(factKey(forLabel: "Do you have family members that are currently employed at Citadel?") == "familyAtCompany")
+  #expect(factKey(forLabel: "Family name") == "lastName")
+}
